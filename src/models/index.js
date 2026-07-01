@@ -83,8 +83,7 @@ export const Material = sequelize.define('Material', {
   rolls: { type: DataTypes.INTEGER, defaultValue: 0 },
   unit: { type: DataTypes.STRING, defaultValue: 'Roll' },
   location: {
-    type: DataTypes.STRING(25),
-    references: { model: 'Shelves', key: 'id' }
+    type: DataTypes.STRING(255)
   },
   status: { type: DataTypes.STRING, defaultValue: 'Active' },
   stockKg: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
@@ -178,8 +177,7 @@ export const DyeingMaterial = sequelize.define('DyeingMaterial', {
   billNumber: { type: DataTypes.STRING(50) },
   date: { type: DataTypes.STRING(20) },
   location: {
-    type: DataTypes.STRING(25),
-    references: { model: 'Shelves', key: 'id' }
+    type: DataTypes.STRING(255)
   },
   receivedPerson: { type: DataTypes.STRING(100) },
   authorizedPerson: { type: DataTypes.STRING(100) },
@@ -189,7 +187,8 @@ export const DyeingMaterial = sequelize.define('DyeingMaterial', {
   weight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
   generatedAt: { type: DataTypes.STRING(20) },
   timestamp: { type: DataTypes.STRING },
-  status: { type: DataTypes.STRING(20), defaultValue: 'in_stock' }
+  status: { type: DataTypes.STRING(20), defaultValue: 'in_stock' },
+  unit: { type: DataTypes.STRING, defaultValue: 'KGS' }
 });
 
 // --- FABRIC ISSUANCE MODEL ---
@@ -209,7 +208,8 @@ export const FabricIssuance = sequelize.define('FabricIssuance', {
   barcodeIds: { type: DataTypes.TEXT },
   issuedItems: { type: DataTypes.TEXT },
   remarks: { type: DataTypes.TEXT },
-  offlineSavedAt: { type: DataTypes.STRING(50) }
+  offlineSavedAt: { type: DataTypes.STRING(50) },
+  kharchaItems: { type: DataTypes.TEXT }
 });
 
 // --- FABRIC RETURN MODEL ---
@@ -319,12 +319,12 @@ Supplier.hasMany(Material, { foreignKey: 'supplier' });
 Material.belongsTo(Supplier, { foreignKey: 'supplier' });
 
 // Shelf -> Materials
-Shelf.hasMany(Material, { foreignKey: 'location' });
-Material.belongsTo(Shelf, { foreignKey: 'location' });
+// Shelf.hasMany(Material, { foreignKey: 'location' });
+// Material.belongsTo(Shelf, { foreignKey: 'location' });
 
 // Shelf -> DyeingMaterials
-Shelf.hasMany(DyeingMaterial, { foreignKey: 'location' });
-DyeingMaterial.belongsTo(Shelf, { foreignKey: 'location' });
+// Shelf.hasMany(DyeingMaterial, { foreignKey: 'location' });
+// DyeingMaterial.belongsTo(Shelf, { foreignKey: 'location' });
 
 // Supplier -> GRNs
 Supplier.hasMany(Grn, { foreignKey: 'supplier' });

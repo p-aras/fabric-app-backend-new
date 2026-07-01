@@ -37,6 +37,29 @@ export const getIssuedRolls = async (req, res) => {
     const barcodeIds = Array.from(barcodeSet);
     console.log(`🔍 Found ${barcodeIds.length} unique barcodes issued for Lot ${lotNumber}:`, barcodeIds);
 
+    // Helper to find exact issued shade for a barcode
+    const findExactIssuedShade = (barcode) => {
+      for (const iss of issuances) {
+        if (iss.issuedItems) {
+          try {
+            const items = JSON.parse(iss.issuedItems);
+            if (Array.isArray(items)) {
+              const match = items.find(it => {
+                const bcs = it.barcodeIds || [];
+                return bcs.includes(barcode);
+              });
+              if (match && match.shade) {
+                return match.shade;
+              }
+            }
+          } catch (e) {
+            console.error('Error parsing issuedItems in findExactIssuedShade:', e);
+          }
+        }
+      }
+      return null;
+    };
+
     if (barcodeIds.length === 0) {
       return res.json({
         success: true,
@@ -83,7 +106,7 @@ export const getIssuedRolls = async (req, res) => {
         id: roll.id,
         barcodeId: roll.barcodeId,
         fabricName: roll.fabricName || 'Dyeing Fabric',
-        shade: roll.shade || 'N/A',
+        shade: findExactIssuedShade(roll.barcodeId) || roll.shade || 'N/A',
         cmfName: roll.cmfName || roll.party || '',
         party: roll.cmfName || roll.party || '',
         originalIssuedWeight: originalIssuedWeight,
@@ -113,7 +136,7 @@ export const getIssuedRolls = async (req, res) => {
         id: mat.id,
         barcodeId: mat.code,
         fabricName: mat.name || 'Material Fabric',
-        shade: mat.color || 'N/A',
+        shade: findExactIssuedShade(mat.code) || mat.color || 'N/A',
         cmfName: mat.receivedPerson || '',
         party: mat.receivedPerson || '',
         originalIssuedWeight: originalIssuedWeight,
@@ -167,7 +190,7 @@ export const getIssuedRolls = async (req, res) => {
         id: roll.id,
         barcodeId: roll.barcode,
         fabricName: roll.item_description || 'Inventory Fabric',
-        shade: roll.shade || 'N/A',
+        shade: findExactIssuedShade(roll.barcode) || roll.shade || 'N/A',
         cmfName: roll.party || '',
         party: roll.party || '',
         originalIssuedWeight: originalIssuedWeight,
@@ -451,7 +474,15 @@ export const nextReturnBarcode = async (req, res) => {
 export const updateReturnSticker = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { originalBarcodeId, newBarcodeId, stickerGeneratedAt, stickerPrinted } = req.body;
+    const { 
+      originalBarcodeId, 
+      newBarcodeId, 
+      stickerGeneratedAt, 
+      stickerPrinted,
+      location,
+      receivedBy,
+      authorizedBy
+    } = req.body;
 
     console.log(`🏷️ Updating return sticker for original roll ${originalBarcodeId} -> new roll ${newBarcodeId}`);
 
@@ -473,7 +504,10 @@ export const updateReturnSticker = async (req, res) => {
       newBarcodeId,
       barcodeId: newBarcodeId,
       stickerGeneratedAt,
-      stickerPrinted: !!stickerPrinted
+      stickerPrinted: !!stickerPrinted,
+      location: location || returnRecord.location,
+      receivedBy: receivedBy || returnRecord.receivedBy,
+      authorizedBy: authorizedBy || returnRecord.authorizedBy
     }, { transaction });
 
     // Register a new active roll in DyeingMaterial table under the new R-prefix barcode
@@ -495,9 +529,9 @@ export const updateReturnSticker = async (req, res) => {
         shade: originalRoll.shade || '',
         billNumber: originalRoll.billNumber || '',
         date: new Date().toISOString().slice(0, 10),
-        location: returnRecord.location || originalRoll.location || '',
-        receivedPerson: returnRecord.receivedBy || originalRoll.receivedPerson || '',
-        authorizedPerson: returnRecord.authorizedBy || originalRoll.authorizedPerson || '',
+        location: location || returnRecord.location || originalRoll.location || '',
+        receivedPerson: receivedBy || returnRecord.receivedBy || originalRoll.receivedPerson || '',
+        authorizedPerson: authorizedBy || returnRecord.authorizedBy || originalRoll.authorizedPerson || '',
         rollNumber: 1,
         batchTotal: 1,
         batchStatus: 'completed',
@@ -516,12 +550,12 @@ export const updateReturnSticker = async (req, res) => {
         weight: parseFloat(returnRecord.returnedWeight) || 0.00,
         rolls: 1,
         unit: 'Roll',
-        location: returnRecord.location || originalRoll.location || '',
+        location: location || returnRecord.location || originalRoll.location || '',
         status: 'Active',
         stockKg: parseFloat(returnRecord.returnedWeight) || 0.00,
         billNumber: originalRoll.billNumber || '',
-        receivedPerson: returnRecord.receivedBy || '',
-        authorizedPerson: returnRecord.authorizedBy || '',
+        receivedPerson: receivedBy || returnRecord.receivedBy || '',
+        authorizedPerson: authorizedBy || returnRecord.authorizedBy || '',
         receivedDate: new Date().toISOString().slice(0, 10),
         lotNo: originalRoll.lotNumber || ''
       }, { transaction });

@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "db:sync": "node scripts/syncDatabase.js",
+    "db:import": "node scripts/import_inventory.js",
     "cleanup": "node scripts/cleanup_keys.js"
   },
   "dependencies": {

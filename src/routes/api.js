@@ -59,8 +59,12 @@ import {
   fetchSheetDataByLot,
   fetchJobOrders,
   fetchInventoryRolls,
+  getRawInventory,
+  getInventoryFilterValues,
   searchJobOrderByLot,
-  findRollByBarcode
+  findRollByBarcode,
+  getPendingCuttingLots,
+  getDailyInventoryReport
 } from '../controllers/sheetsController.js';
 
 import {
@@ -116,6 +120,11 @@ router.get('/google-sheets/fetch-dyeing-lot-details', fetchDyeingLotDetails);
 router.get('/google-sheets/fetch-by-lot/:lotNo(*)', fetchSheetDataByLot);
 router.get('/google-sheets/job-orders', fetchJobOrders);
 router.get('/google-sheets/fabric-rolls', fetchInventoryRolls);
+router.get('/google-sheets/pending-cutting', getPendingCuttingLots);
+
+router.get('/inventory', getRawInventory);
+router.get('/reports/daily-inventory-quantity', getDailyInventoryReport);
+router.get('/inventory/filter-values', getInventoryFilterValues);
 router.get('/google-sheets/fabric-roll/:barcodeId', findRollByBarcode);
 router.post('/google-sheets/store-fabric-data', storeFabricData);
 router.post('/google-sheets/store-dyeing-data', storeDyeingData);

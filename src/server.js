@@ -45,8 +45,36 @@ const startServer = async () => {
     await sequelize.authenticate();
     console.log(`Successfully connected to ${dialect.toUpperCase()} database.`);
 
+    // Drop foreign keys on location column first to allow schema alteration
+    const dropLocationFks = async (tableName) => {
+      try {
+        const [fks] = await sequelize.query(`
+          SELECT CONSTRAINT_NAME 
+          FROM information_schema.KEY_COLUMN_USAGE 
+          WHERE TABLE_SCHEMA = DATABASE() 
+            AND TABLE_NAME = '${tableName}' 
+            AND COLUMN_NAME = 'location' 
+            AND REFERENCED_TABLE_NAME IS NOT NULL
+        `);
+        for (const row of fks) {
+          const fkName = row.CONSTRAINT_NAME || row.constraint_name;
+          if (fkName) {
+            console.log(`Dropping foreign key constraint ${fkName} on ${tableName}...`);
+            await sequelize.query(`ALTER TABLE \`${tableName}\` DROP FOREIGN KEY \`${fkName}\``);
+          }
+        }
+      } catch (err) {
+        console.log(`Info: No foreign key dropped on ${tableName}:`, err.message);
+      }
+    };
+
+    if (dialect === 'mysql') {
+      await dropLocationFks('Materials');
+      await dropLocationFks('DyeingMaterials');
+    }
+
     // Sync models (creates MySQL tables if they do not exist)
-    await sequelize.sync();
+    await sequelize.sync({ alter: true });
     console.log('Database tables synchronized.');
 
     // Ensure lotNo column exists on Materials table

@@ -34,14 +34,17 @@ export const getPartaData = async (req, res) => {
 
 export const getPartaPendingReport = async (req, res) => {
   try {
-    const issuanceLots = await FabricIssuance.findAll({
-      attributes: ['lotNumber'],
-      group: ['lotNumber']
-    });
-    const dyeingLots = await DyeingMaterial.findAll({
-      attributes: ['lotNumber'],
-      group: ['lotNumber']
-    });
+    const [issuanceLots, dyeingLots, partaRecords] = await Promise.all([
+      FabricIssuance.findAll({
+        attributes: ['lotNumber'],
+        group: ['lotNumber']
+      }),
+      DyeingMaterial.findAll({
+        attributes: ['lotNumber'],
+        group: ['lotNumber']
+      }),
+      Parta.findAll()
+    ]);
 
     const lotNumbersSet = new Set();
     issuanceLots.forEach(item => {
@@ -52,7 +55,6 @@ export const getPartaPendingReport = async (req, res) => {
     });
 
     const allLotNumbers = Array.from(lotNumbersSet).filter(lot => lot !== '');
-    const partaRecords = await Parta.findAll();
     const partaMap = new Map();
     partaRecords.forEach(record => {
       partaMap.set(String(record.lotNumber).trim(), record.data);

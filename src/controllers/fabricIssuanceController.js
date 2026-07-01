@@ -56,7 +56,8 @@ export const storeFabricIssuance = async (req, res) => {
       issuedAt,
       barcodeIds,
       remarks,
-      jobDetails
+      jobDetails,
+      kharchaItems
     } = req.body;
 
     const issuanceId = `ISS-FAB-${Date.now()}`;
@@ -76,7 +77,8 @@ export const storeFabricIssuance = async (req, res) => {
       status: 'completed',
       barcodeIds: JSON.stringify(barcodeIds || []),
       issuedItems: JSON.stringify(issuedItems || []),
-      remarks: remarks || ''
+      remarks: remarks || '',
+      kharchaItems: JSON.stringify(kharchaItems || [])
     }, { transaction });
 
     // Store FabricChangeApprovals if provided
@@ -245,6 +247,11 @@ export const issuanceHistory = async (req, res) => {
         data.issuedItems = [];
         data.items = [];
       }
+      try {
+        data.kharchaItems = JSON.parse(data.kharchaItems || '[]');
+      } catch (e) {
+        data.kharchaItems = [];
+      }
       return data;
     });
 
@@ -322,7 +329,8 @@ export const syncOfflineData = async (req, res) => {
         barcodeIds,
         remarks,
         offlineSavedAt,
-        jobDetails
+        jobDetails,
+        kharchaItems
       } = record;
 
       const issuanceId = `ISS-FAB-OFF-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -342,7 +350,8 @@ export const syncOfflineData = async (req, res) => {
         barcodeIds: JSON.stringify(barcodeIds || []),
         issuedItems: JSON.stringify(issuedItems || []),
         remarks: remarks || '',
-        offlineSavedAt: offlineSavedAt || ''
+        offlineSavedAt: offlineSavedAt || '',
+        kharchaItems: JSON.stringify(kharchaItems || [])
       }, { transaction });
 
       // Store FabricChangeApprovals if provided offline

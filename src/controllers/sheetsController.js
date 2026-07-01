@@ -1,6 +1,7 @@
 import { Material, Room, DyeingMaterial, JobOrder, Inventory } from '../models/index.js';
 import { addAuditLog, checkShelfCapacity } from './materialController.js';
 import { Op } from 'sequelize';
+import sequelize from '../config/db.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -44,24 +45,80 @@ const getDefaultSheetDataCsv = () => {
 
 export const nextBarcodeId = async (req, res) => {
   try {
-    const lastMaterial = await Material.findOne({
-      order: [['code', 'DESC']]
-    });
-    const lastDyeing = await DyeingMaterial.findOne({
-      order: [['barcodeId', 'DESC']]
-    });
+    const type = (req.query.type || '').toLowerCase();
+    let barcodeId = '';
+    let nextId = 0;
+    let lastId = 0;
 
-    const getNumericId = (barcode) => {
-      if (!barcode) return 0;
-      const match = barcode.match(/\d+/);
-      return match ? parseInt(match[0], 10) : 0;
-    };
+    if (type === 'material') {
+      const lastMaterial = await Material.findOne({
+        where: {
+          code: {
+            [Op.like]: '1%'
+          }
+        },
+        order: [['code', 'DESC']]
+      });
+      lastId = 1000000;
+      if (lastMaterial) {
+        const match = lastMaterial.code.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
+    } else if (type === 'dyeing') {
+      const lastDyeing = await DyeingMaterial.findOne({
+        where: {
+          barcodeId: {
+            [Op.like]: '2%'
+          }
+        },
+        order: [['barcodeId', 'DESC']]
+      });
+      lastId = 2000000;
+      if (lastDyeing) {
+        const match = lastDyeing.barcodeId.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
+    } else if (type === 'fabric-stock') {
+      const lastFabricStock = await Material.findOne({
+        where: {
+          code: {
+            [Op.like]: '3%'
+          }
+        },
+        order: [['code', 'DESC']]
+      });
+      lastId = 3000000;
+      if (lastFabricStock) {
+        const match = lastFabricStock.code.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
+    } else {
+      // Legacy Fallback matching original sequence logic
+      const lastMaterial = await Material.findOne({
+        order: [['code', 'DESC']]
+      });
+      const lastDyeing = await DyeingMaterial.findOne({
+        order: [['barcodeId', 'DESC']]
+      });
 
-    const lastMatId = lastMaterial ? getNumericId(lastMaterial.code) : 0;
-    const lastDyeingId = lastDyeing ? getNumericId(lastDyeing.barcodeId) : 0;
-    const lastId = Math.max(lastMatId, lastDyeingId);
-    const nextId = lastId + 1;
-    const barcodeId = `MAT${String(nextId).padStart(5, '0')}`;
+      const getNumericId = (barcode) => {
+        if (!barcode) return 0;
+        const match = barcode.match(/\d+/);
+        return match ? parseInt(match[0], 10) : 0;
+      };
+
+      const lastMatId = lastMaterial ? getNumericId(lastMaterial.code) : 0;
+      const lastDyeingId = lastDyeing ? getNumericId(lastDyeing.barcodeId) : 0;
+      lastId = Math.max(lastMatId, lastDyeingId);
+      nextId = lastId + 1;
+      barcodeId = `MAT${String(nextId).padStart(5, '0')}`;
+    }
 
     res.json({
       success: true,
@@ -92,7 +149,8 @@ export const storeFabricData = async (req, res) => {
       authorizedPerson,
       weight,
       rollNumber,
-      batchTotal
+      batchTotal,
+      unit
     } = req.body;
 
     // Determine category based on room if possible, else default to 'Summer Fabric'
@@ -108,7 +166,7 @@ export const storeFabricData = async (req, res) => {
       supplier: null, // default
       weight: parseFloat(weight) || 0.00,
       rolls: 1, // single roll per barcode
-      unit: 'Roll',
+      unit: unit || 'KGS',
       location: location || '',
       status: 'Active',
       stockKg: parseFloat(weight) || 0.00,
@@ -183,7 +241,8 @@ export const storeDyeingData = async (req, res) => {
       weight: parseFloat(weight) || 0.00,
       generatedAt: generatedAt || new Date().toLocaleTimeString(),
       timestamp: timestamp || new Date().toISOString(),
-      status: 'in_stock'
+      status: 'in_stock',
+      unit: 'KGS'
     });
 
     await addAuditLog(
@@ -603,6 +662,7 @@ export const fetchJobOrders = async (req, res) => {
 
     const headers = rows[0];
     const parsedRows = [];
+    const dbUpsertData = [];
 
     for (let i = 1; i < rows.length; i++) {
       const cells = rows[i];
@@ -612,11 +672,13 @@ export const fetchJobOrders = async (req, res) => {
         obj[header] = cells[index] || '';
       });
       parsedRows.push(obj);
-      // Upsert into MySQL JobOrder table
-      try {
-        await JobOrder.upsert({
+
+      // Collect data for background bulk upsert
+      const lotNumber = obj['Lot Number'] || '';
+      if (lotNumber) {
+        dbUpsertData.push({
           jobOrderNo: obj['Job Order No'] || '',
-          lotNumber: obj['Lot Number'] || '',
+          lotNumber: lotNumber,
           fabric: obj['Fabric'] || '',
           brand: obj['Brand'] || '',
           quantity: parseInt(obj['Quantity']) || 0,
@@ -630,13 +692,40 @@ export const fetchJobOrders = async (req, res) => {
           pattern: obj['Pattern'] || '',
           style: obj['Style'] || ''
         });
-      } catch (upsertErr) {
-        console.error('Error upserting JobOrder:', upsertErr);
       }
     }
 
-    console.log(`[Sheets API] Loaded ${parsedRows.length} Job Orders from Google Sheets`);
+    console.log(`[Sheets API] Fetched and parsed ${parsedRows.length} Job Orders. Responding to client instantly.`);
+    
+    // 1. Respond to user instantly
     res.json(parsedRows);
+
+    // 2. Perform database upsert in background
+    if (dbUpsertData.length > 0) {
+      // Filter out duplicate lot numbers within this batch to prevent DB constraint errors
+      const uniqueDbUpsertData = [];
+      const seenLots = new Set();
+      for (let j = dbUpsertData.length - 1; j >= 0; j--) {
+        const item = dbUpsertData[j];
+        if (!seenLots.has(item.lotNumber)) {
+          seenLots.add(item.lotNumber);
+          uniqueDbUpsertData.unshift(item);
+        }
+      }
+
+      console.log(`[Sheets API] Syncing ${uniqueDbUpsertData.length} unique Job Orders to MySQL in background...`);
+      JobOrder.bulkCreate(uniqueDbUpsertData, {
+        updateOnDuplicate: [
+          'jobOrderNo', 'fabric', 'brand', 'quantity', 'unit', 
+          'shade', 'date', 'size', 'garmentType', 'section', 
+          'season', 'pattern', 'style'
+        ]
+      }).then(() => {
+        console.log('[Sheets API] Background database sync completed successfully!');
+      }).catch(bulkErr => {
+        console.error('[Sheets API] Background database sync failed:', bulkErr);
+      });
+    }
   } catch (error) {
     console.error('[Sheets API] Error fetching job orders:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -662,7 +751,10 @@ export const fetchInventoryRolls = async (req, res) => {
       'Shade': m.color,
       'Weight (KG)': parseFloat(m.weight) || 0.00,
       'Status': (m.status || 'Active').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
-      'Party': ''
+      'Party': '',
+      'Lot No': m.lotNo || '',
+      'Location': m.location || '',
+      'Rolls': m.rolls || 1
     }));
 
     const mappedDyeing = dyeingMaterials.map(dm => ({
@@ -671,7 +763,10 @@ export const fetchInventoryRolls = async (req, res) => {
       'Shade': dm.shade,
       'Weight (KG)': parseFloat(dm.weight) || 0.00,
       'Status': (dm.status || 'in_stock').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
-      'Party': dm.cmfName || ''
+      'Party': dm.cmfName || '',
+      'Lot No': dm.lotNumber || '',
+      'Location': dm.location || '',
+      'Rolls': dm.rollNumber || 1
     }));
 
     const mappedInventory = inventoryItems.map(inv => ({
@@ -680,7 +775,10 @@ export const fetchInventoryRolls = async (req, res) => {
       'Shade': inv.shade,
       'Weight (KG)': parseFloat(inv.bal_wt) || 0.00,
       'Status': (parseFloat(inv.bal_wt) <= 0 || (inv.bal_pkgs && parseInt(inv.bal_pkgs) <= 0)) ? 'issued' : 'in_stock',
-      'Party': inv.party || ''
+      'Party': inv.party || '',
+      'Lot No': inv.lot_no || '',
+      'Location': inv.store || '',
+      'Rolls': parseInt(inv.bal_pkgs) || 1
     }));
 
     const allRolls = [...mappedMaterials, ...mappedDyeing, ...mappedInventory];
@@ -688,6 +786,226 @@ export const fetchInventoryRolls = async (req, res) => {
     res.json(allRolls);
   } catch (error) {
     console.error('[Inventory API] Error fetching inventory rolls:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const getDailyInventoryReport = async (req, res) => {
+  try {
+    const { date } = req.query;
+    let targetDate = new Date();
+    if (date) {
+      targetDate = new Date(date);
+    }
+    
+    const startOfTarget = new Date(targetDate);
+    startOfTarget.setHours(0, 0, 0, 0);
+    const endOfTarget = new Date(targetDate);
+    endOfTarget.setHours(23, 59, 59, 999);
+
+    const targetDateStr = startOfTarget.toISOString().slice(0, 10);
+
+    // Query materials added on target day
+    const materials = await Material.findAll({
+      where: {
+        [Op.or]: [
+          {
+            createdAt: {
+              [Op.between]: [startOfTarget, endOfTarget]
+            }
+          },
+          { receivedDate: targetDateStr }
+        ]
+      }
+    });
+
+    // Query dyeing materials added on target day
+    const dyeingMaterials = await DyeingMaterial.findAll({
+      where: {
+        [Op.or]: [
+          {
+            createdAt: {
+              [Op.between]: [startOfTarget, endOfTarget]
+            }
+          },
+          { date: targetDateStr }
+        ]
+      }
+    });
+
+    const mappedMaterials = materials.map(m => ({
+      type: 'Material',
+      barcode: m.code,
+      name: m.name,
+      shade: m.color || '—',
+      lotNo: m.lotNo || '—',
+      location: m.location || '—',
+      weight: parseFloat(m.weight) || 0,
+      rolls: m.rolls || 1,
+      unit: m.unit || 'Roll',
+      createdAt: m.createdAt
+    }));
+
+    const mappedDyeing = dyeingMaterials.map(dm => ({
+      type: 'Dyeing Material',
+      barcode: dm.barcodeId,
+      name: dm.fabricName || dm.cmfName,
+      shade: dm.shade || '—',
+      lotNo: dm.lotNumber || '—',
+      location: dm.location || '—',
+      weight: parseFloat(dm.weight) || 0,
+      rolls: dm.rollNumber || 1,
+      unit: dm.unit || 'KGS',
+      createdAt: dm.createdAt
+    }));
+
+    const result = [...mappedMaterials, ...mappedDyeing];
+    console.log(`[Daily Inventory Report] Found ${result.length} entries for date: ${targetDateStr}`);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('[Daily Inventory Report] Error fetching report:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const getRawInventory = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const search = req.query.search || '';
+    const offset = (page - 1) * limit;
+
+    // Helper to get array of values from query
+    const getQueryArray = (value) => {
+      if (!value) return null;
+      if (Array.isArray(value)) return value;
+      return value.split(',').map(v => v.trim()).filter(Boolean);
+    };
+
+    // Filters
+    const filterParties = getQueryArray(req.query.party);
+    const filterShades = getQueryArray(req.query.shade);
+    const filterStores = getQueryArray(req.query.store);
+    const filterDescriptions = getQueryArray(req.query.description);
+    const filterStockStatus = req.query.stockStatus || 'All'; // All, In Stock, Out of Stock
+
+    console.log(`[Inventory API] Fetching raw inventory page ${page}...`);
+
+    const whereClause = {};
+
+    // Search query
+    if (search) {
+      whereClause[Op.or] = [
+        { barcode: { [Op.like]: `%${search}%` } },
+        { item_description: { [Op.like]: `%${search}%` } },
+        { lot_no: { [Op.like]: `%${search}%` } },
+        { shade: { [Op.like]: `%${search}%` } },
+        { party: { [Op.like]: `%${search}%` } },
+        { store: { [Op.like]: `%${search}%` } }
+      ];
+    }
+
+    // Party filter (supports multi-select)
+    if (filterParties && filterParties.length > 0) {
+      whereClause.party = { [Op.in]: filterParties };
+    }
+
+    // Shade filter (supports multi-select)
+    if (filterShades && filterShades.length > 0) {
+      whereClause.shade = { [Op.in]: filterShades };
+    }
+
+    // Store filter (supports multi-select)
+    if (filterStores && filterStores.length > 0) {
+      whereClause.store = { [Op.in]: filterStores };
+    }
+
+    // Item Description filter (supports multi-select)
+    if (filterDescriptions && filterDescriptions.length > 0) {
+      whereClause.item_description = { [Op.in]: filterDescriptions };
+    }
+
+    // Stock Status filter
+    if (filterStockStatus === 'In Stock') {
+      whereClause.bal_wt = { [Op.gt]: 0 };
+    } else if (filterStockStatus === 'Out of Stock') {
+      whereClause[Op.or] = [
+        { bal_wt: { [Op.lte]: 0 } },
+        { bal_wt: null }
+      ];
+    }
+
+    // Bal Pkgs filter
+    if (req.query.balPkgs !== undefined && req.query.balPkgs !== '') {
+      whereClause.bal_pkgs = req.query.balPkgs;
+    }
+
+    const { count, rows } = await Inventory.findAndCountAll({
+      where: whereClause,
+      limit,
+      offset,
+      order: [['id', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: rows,
+      totalCount: count,
+      totalPages: Math.ceil(count / limit),
+      currentPage: page,
+      limit
+    });
+  } catch (error) {
+    console.error('[Inventory API] Error fetching raw inventory:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const getInventoryFilterValues = async (req, res) => {
+  try {
+    console.log('[Inventory API] Fetching distinct filter values...');
+
+    const parties = await Inventory.findAll({
+      attributes: ['party'],
+      where: { party: { [Op.ne]: null, [Op.ne]: '' } },
+      group: ['party'],
+      order: [['party', 'ASC']],
+      raw: true
+    });
+
+    const shades = await Inventory.findAll({
+      attributes: ['shade'],
+      where: { shade: { [Op.ne]: null, [Op.ne]: '' } },
+      group: ['shade'],
+      order: [['shade', 'ASC']],
+      raw: true
+    });
+
+    const stores = await Inventory.findAll({
+      attributes: ['store'],
+      where: { store: { [Op.ne]: null, [Op.ne]: '' } },
+      group: ['store'],
+      order: [['store', 'ASC']],
+      raw: true
+    });
+
+    const descriptions = await Inventory.findAll({
+      attributes: ['item_description'],
+      where: { item_description: { [Op.ne]: null, [Op.ne]: '' } },
+      group: ['item_description'],
+      order: [['item_description', 'ASC']],
+      raw: true
+    });
+
+    res.json({
+      success: true,
+      parties: parties.map(p => p.party).filter(Boolean),
+      shades: shades.map(s => s.shade).filter(Boolean),
+      stores: stores.map(st => st.store).filter(Boolean),
+      descriptions: descriptions.map(d => d.item_description).filter(Boolean)
+    });
+  } catch (error) {
+    console.error('[Inventory API] Error fetching filter values:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -738,19 +1056,19 @@ export const searchJobOrderByLot = async (req, res) => {
 
     if (inventoryRecords && inventoryRecords.length > 0) {
       console.log(`[Job Order Search] Found Lot ${lotNumber} in MySQL Inventory table with ${inventoryRecords.length} records`);
-      
+
       const firstRecord = inventoryRecords[0];
-      
+
       // Aggregate all unique shades from the inventory records
       const shades = [...new Set(inventoryRecords.map(r => r.shade).filter(Boolean))].join(', ');
-      
+
       // Sum the bal_pkgs or mrn_pkgs
       let totalQty = 0;
       inventoryRecords.forEach(r => {
         const pkgs = parseInt(r.bal_pkgs) || parseInt(r.mrn_pkgs) || 0;
         totalQty += pkgs;
       });
-      
+
       const mappedData = {
         'Job Order No': firstRecord.rect_no || `JO-${lotNumber}`,
         'Lot Number': lotNumber,
@@ -767,7 +1085,7 @@ export const searchJobOrderByLot = async (req, res) => {
         'Pattern': 'N/A',
         'Style': 'N/A'
       };
-      
+
       return res.json({
         success: true,
         data: mappedData,
@@ -851,9 +1169,11 @@ export const findRollByBarcode = async (req, res) => {
           'Item Description': dm.fabricName || dm.cmfName,
           'Shade': dm.shade,
           'Weight (KG)': parseFloat(dm.weight) || 0.00,
+          'MRN WT': parseFloat(dm.weight) || 0.00,
           'Status': (dm.status || 'in_stock').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
           'Party': dm.cmfName || '',
-          'cmfName': dm.cmfName || ''
+          'cmfName': dm.cmfName || '',
+          'Location': dm.location || ''
         }
       });
     }
@@ -876,7 +1196,8 @@ export const findRollByBarcode = async (req, res) => {
           'Weight (KG)': parseFloat(m.weight) || 0.00,
           'Status': (m.status || 'Active').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
           'Party': m.receivedPerson || '',
-          'cmfName': m.receivedPerson || ''
+          'cmfName': m.receivedPerson || '',
+          'Location': m.location || ''
         }
       });
     }
@@ -899,7 +1220,8 @@ export const findRollByBarcode = async (req, res) => {
           'Weight (KG)': parseFloat(inv.bal_wt) || parseFloat(inv.mrn_wt) || 0.00,
           'Status': (parseFloat(inv.bal_wt) <= 0 || (inv.bal_pkgs && parseInt(inv.bal_pkgs) <= 0)) ? 'issued' : 'in_stock',
           'Party': inv.party || '',
-          'cmfName': inv.party || ''
+          'cmfName': inv.party || '',
+          'Location': inv.location || ''
         }
       });
     }
@@ -912,6 +1234,656 @@ export const findRollByBarcode = async (req, res) => {
 
   } catch (error) {
     console.error('Error in findRollByBarcode:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/** ====== CUTTING Logic - Backend-side Google Sheets Fetch & Processing ====== */
+
+const HEADER_ALIAS_TO_CANON = {
+  joborderno: "Job Order No",
+  "joborder no": "Job Order No",
+  "job order no": "Job Order No",
+  jobordeerno: "Job Order No",
+  orderno: "Job Order No",
+  "jo no": "Job Order No",
+  fabric: "Fabric",
+  brand: "Brand",
+  style: "Style",
+  partyname: "Party Name",
+  party: "Party Name",
+  garmenttype: "Garment Type",
+  garment: "Garment Type",
+  section: "Section",
+  season: "Season",
+  directstitching: "Direct Stitching",
+  "direct stitching": "Direct Stitching",
+  lotno: "Lot No",
+  lotnumber: "Lot No",
+  "lot number": "Lot No",
+  date: "Date",
+  status: "Status",
+  priority: "Priority",
+  fabricsupervisor: "FABRIC_SUPERVISOR",
+  "fabric supervisor": "FABRIC_SUPERVISOR",
+  fabric_supervisor: "FABRIC_SUPERVISOR"
+};
+
+const norm = (s) => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+
+function normalizeKey(s = "") {
+  return norm(s);
+}
+
+function formatDateYMDToDDMMMYYYY(dateStr) {
+  if (!dateStr) return "";
+  const parts = String(dateStr).split("-");
+  if (parts.length === 3) {
+    const [year, month, day] = parts.map(p => parseInt(p, 10));
+    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthName = monthNames[month - 1] || "";
+      return `${day} ${monthName} ${year}`;
+    }
+  }
+  return dateStr;
+}
+
+function formatSavedAtToYMD(savedAt) {
+  if (!savedAt) return "";
+  const d = new Date(savedAt);
+  if (isNaN(d.getTime())) return "";
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = d.getDate();
+  const monthName = monthNames[d.getMonth()];
+  const year = d.getFullYear();
+  return `${day} ${monthName} ${year}`;
+}
+
+function daysAfter(dateStr) {
+  if (!dateStr) return "";
+  const parts = String(dateStr).split("-");
+  if (parts.length !== 3) return "";
+  const [y, m, d] = parts.map((p) => parseInt(p, 10));
+  if (!y || !m || !d) return "";
+  const start = new Date(y, m - 1, d);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const diff = Math.floor((today - start) / MS_PER_DAY);
+  return Number.isFinite(diff) ? String(diff) : "";
+}
+
+function convertValuesToObjects(values) {
+  if (!values || values.length === 0) return [];
+  const rawHeaders = values[0];
+
+  const canonAtIndex = rawHeaders.map((h) => HEADER_ALIAS_TO_CANON[normalizeKey(h)] || null);
+  const canonToIndex = {};
+  canonAtIndex.forEach((canon, idx) => {
+    if (canon && !(canon in canonToIndex)) canonToIndex[canon] = idx;
+  });
+
+  return values.slice(1).map((row) => {
+    const obj = {};
+    [
+      "Job Order No",
+      "Date",
+      "Fabric",
+      "Brand",
+      "Style",
+      "Party Name",
+      "Garment Type",
+      "Section",
+      "Season",
+      "Direct Stitching",
+      "Lot No",
+      "Status",
+      "Priority",
+      "FABRIC_SUPERVISOR"
+    ].forEach((canonHeader) => {
+      const idx = canonToIndex[canonHeader];
+      let value = idx != null ? (row[idx] ?? "") : "";
+      
+      if (canonHeader === "Date" && value) {
+        value = formatDateYMDToDDMMMYYYY(value);
+      }
+      
+      obj[canonHeader] = value;
+    });
+    
+    if (canonToIndex["Date"] != null) {
+      const originalDate = row[canonToIndex["Date"]] ?? "";
+      obj["PO Date"] = originalDate;
+    } else {
+      obj["PO Date"] = "";
+    }
+    
+    obj["Days after PO issue"] = "";
+    obj["Total Qty"] = 0;
+    obj["Pending Shade"] = "";
+    obj["Remarks"] = "";
+    obj["Cutting Date"] = "";
+    return obj;
+  });
+}
+
+function parseIndexRow(header, row) {
+  const hmap = {};
+  header.forEach((h, i) => (hmap[normalizeKey(h)] = i));
+  const get = (key) => {
+    const i = hmap[key];
+    return i == null || i < 0 ? "" : row[i] ?? "";
+  };
+
+  const lot = String(get("lotnumber") || get("lot number") || get("lotno")).trim();
+  if (!lot) return null;
+
+  const startRow = parseInt(get("startrow") || "0", 10);
+  const numRows = parseInt(get("numrows") || "0", 10);
+  const headerCols = parseInt(get("headercols") || "0", 10);
+  const fabric = get("fabric");
+  const garmentType = get("garmenttype") || get("garment");
+  const style = get("style");
+  const savedAt = get("savedat");
+
+  const sizes = String(get("sizes") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const shades = String(get("shades") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  return { lot, startRow, numRows, headerCols, fabric, garmentType, style, sizes, shades, savedAt };
+}
+
+function sliceCuttingMatrix(bigValues, startRow, numRows) {
+  if (!Array.isArray(bigValues) || bigValues.length === 0) return [];
+  if (!(startRow > 0 && numRows > 0)) return [];
+  const r0 = Math.max(0, startRow - 1);
+  const r1 = Math.min(bigValues.length - 1, r0 + numRows - 1);
+  return bigValues.slice(r0, r1 + 1);
+}
+
+function findHeaderRowIndex(windowValues, expectedSizesNorm) {
+  for (let i = 0; i < Math.min(windowValues.length, 20); i++) {
+    const row = windowValues[i] || [];
+    const rowText = row.map(c => String(c || "").toLowerCase());
+    const hasColor = rowText.some(c => c === "color" || c === "shade" || c === "shades");
+    const hasCuttingTable = rowText.some(c => c === "cutting table" || c === "cuttingtable");
+    const hasSizes = expectedSizesNorm.some(sz => rowText.includes(sz));
+    
+    if (hasColor && (hasCuttingTable || hasSizes)) {
+      return i;
+    }
+  }
+  
+  let bestMatchIdx = 0;
+  let bestMatchCount = 0;
+  for (let i = 0; i < Math.min(windowValues.length, 20); i++) {
+    const row = windowValues[i] || [];
+    const rowText = row.map(c => String(c || "").toLowerCase());
+    let matchCount = 0;
+    expectedSizesNorm.forEach(sz => {
+      if (rowText.includes(sz)) matchCount++;
+    });
+    if (matchCount > bestMatchCount) {
+      bestMatchCount = matchCount;
+      bestMatchIdx = i;
+    }
+  }
+  return bestMatchIdx;
+}
+
+function calculateTotalPCS(cuttingData, startRow, numRows, sizes = []) {
+  if (!cuttingData || cuttingData.length === 0) return 0;
+  if (!(startRow > 0 && numRows > 0)) return 0;
+
+  const r0 = Math.max(0, startRow - 1);
+  const r1 = Math.min(cuttingData.length - 1, r0 + numRows - 1);
+  const windowValues = cuttingData.slice(r0, r1 + 1);
+  if (windowValues.length === 0) return 0;
+
+  const normalizedSizes = Array.from(
+    new Set((sizes || []).map((s) => normalizeKey(s)).filter(Boolean))
+  );
+
+  const localFindHeaderRowIndex = (windowValues, expectedSizesNorm) => {
+    const hasSizeToken = (rowSet) => expectedSizesNorm.some((sz) => rowSet.has(sz));
+    for (let i = 0; i < windowValues.length; i++) {
+      const row = windowValues[i] || [];
+      const set = new Set(row.map((c) => normalizeKey(c)));
+      const hasShadeHeader = set.has("color") || set.has("shade") || set.has("shades");
+      if (hasShadeHeader && hasSizeToken(set)) return i;
+    }
+    for (let i = 0; i < windowValues.length; i++) {
+      const row = windowValues[i] || [];
+      const set = new Set(row.map((c) => normalizeKey(c)));
+      let matches = 0;
+      expectedSizesNorm.forEach((sz) => {
+        if (set.has(sz)) matches++;
+      });
+      if (matches >= 2) return i;
+    }
+    return 0;
+  };
+
+  const headerRowIdx = localFindHeaderRowIndex(windowValues, normalizedSizes);
+  const header = windowValues[headerRowIdx] || [];
+
+  const hIdx = {};
+  header.forEach((h, i) => {
+    const k = normalizeKey(h);
+    if (k && !(k in hIdx)) hIdx[k] = i;
+  });
+
+  const nonSizeColumns = new Set([
+    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total", 
+    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric", 
+    "garment", "partyname", "brand", "section", "season"
+  ]);
+
+  let sizeColIndices = [];
+  header.forEach((h, i) => {
+    const normalizedHeader = normalizeKey(h);
+    if (normalizedHeader && !nonSizeColumns.has(normalizedHeader)) {
+      sizeColIndices.push(i);
+    }
+  });
+
+  if (sizeColIndices.length === 0) {
+    normalizedSizes.forEach((ns) => {
+      if (ns in hIdx) sizeColIndices.push(hIdx[ns]);
+    });
+  }
+
+  if (sizeColIndices.length === 0) return 0;
+
+  const shadeColIndex = hIdx["color"] ?? hIdx["shade"] ?? hIdx["shades"] ?? 0;
+  let totalQty = 0;
+
+  for (let r = headerRowIdx + 1; r < windowValues.length; r++) {
+    const row = windowValues[r] || [];
+    const rawShade = String(row[shadeColIndex] || "").trim();
+    const shadeKey = normalizeKey(rawShade);
+
+    if (!shadeKey || shadeKey === "total" || shadeKey === "totals" || shadeKey === "grandtotal") {
+      continue;
+    }
+
+    sizeColIndices.forEach((c) => {
+      const raw = row[c];
+      if (raw != null && raw !== "") {
+        const n = parseFloat(String(raw).replace(/,/g, ""));
+        if (!isNaN(n) && n > 0) {
+          totalQty += n;
+        }
+      }
+    });
+  }
+  return totalQty;
+}
+
+function computePendingShades(windowValues, sizes = [], shades = []) {
+  if (!windowValues || windowValues.length === 0) {
+    return new Set(shades.map(norm));
+  }
+
+  const normalizedSizes = Array.from(
+    new Set((sizes || []).map((s) => normalizeKey(s)).filter(Boolean))
+  );
+  const headerRowIdx = findHeaderRowIndex(windowValues, normalizedSizes);
+  const header = windowValues[headerRowIdx] || [];
+
+  const hIdx = {};
+  header.forEach((h, i) => {
+    const k = normalizeKey(h);
+    if (k && !(k in hIdx)) hIdx[k] = i;
+  });
+
+  const shadeColIndex = hIdx["color"] ?? hIdx["shade"] ?? hIdx["shades"] ?? 0;
+
+  const nonSizeColumns = new Set([
+    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total", 
+    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric", 
+    "garment", "partyname", "brand", "section", "season"
+  ]);
+
+  let sizeColIndices = [];
+  header.forEach((h, i) => {
+    const normalizedHeader = normalizeKey(h);
+    if (normalizedHeader && !nonSizeColumns.has(normalizedHeader)) {
+      sizeColIndices.push(i);
+    }
+  });
+
+  if (sizeColIndices.length === 0) {
+    normalizedSizes.forEach((ns) => {
+      if (ns in hIdx) sizeColIndices.push(hIdx[ns]);
+    });
+  }
+
+  if (sizeColIndices.length === 0) {
+    return new Set(shades.map(norm));
+  }
+
+  const shadeStats = new Map();
+
+  for (let r = headerRowIdx + 1; r < windowValues.length; r++) {
+    const row = windowValues[r] || [];
+    const rawShade = String(row[shadeColIndex] || "").trim();
+    const shadeKey = normalizeKey(rawShade);
+
+    if (!shadeKey || shadeKey === "total" || shadeKey === "totals" || shadeKey === "grandtotal") {
+      continue;
+    }
+
+    let hasPositiveData = false;
+    let hasAnyData = false;
+
+    sizeColIndices.forEach((c) => {
+      const raw = row[c];
+      if (raw != null && raw !== "") {
+        hasAnyData = true;
+        const n = parseFloat(String(raw).replace(/,/g, ""));
+        if (!isNaN(n) && n > 0) {
+          hasPositiveData = true;
+        }
+      }
+    });
+
+    if (hasAnyData) {
+      if (hasPositiveData) {
+        shadeStats.set(shadeKey, "found-with-data");
+      } else {
+        if (!shadeStats.has(shadeKey) || shadeStats.get(shadeKey) === "not-found") {
+          shadeStats.set(shadeKey, "found-all-zero");
+        }
+      }
+    }
+  }
+
+  const pendingShadeKeys = new Set();
+  const expectedShadeKeys = (shades || []).map((sh) => normalizeKey(sh));
+
+  expectedShadeKeys.forEach((shadeKey) => {
+    const status = shadeStats.get(shadeKey);
+    // If the status is 'found-all-zero', it means the shade was entered with all 0's (cancelled).
+    // It should NOT be considered pending (exclude from pendingShadeKeys).
+    if (!status || status === "found-no-data") {
+      pendingShadeKeys.add(shadeKey);
+    }
+  });
+  return pendingShadeKeys;
+}
+
+function extractCuttingTables(windowValues, sizes = []) {
+  if (!windowValues || windowValues.length === 0) return [];
+  const normalizedSizes = Array.from(
+    new Set((sizes || []).map((s) => normalizeKey(s)).filter(Boolean))
+  );
+  const headerRowIdx = findHeaderRowIndex(windowValues, normalizedSizes);
+  if (headerRowIdx >= windowValues.length) return [];
+  const header = windowValues[headerRowIdx] || [];
+  
+  const hIdx = {};
+  header.forEach((h, i) => {
+    const k = normalizeKey(h);
+    if (k && !(k in hIdx)) hIdx[k] = i;
+  });
+  
+  let tableColIndex = -1;
+  for (let i = 0; i < header.length; i++) {
+    const headerText = String(header[i] || "").trim();
+    const normalizedHeader = normalizeKey(headerText);
+    if (normalizedHeader === "cuttingtable" || 
+        normalizedHeader === "cutting table" ||
+        headerText === "Cutting Table") {
+      tableColIndex = i;
+      break;
+    }
+  }
+  
+  if (tableColIndex === -1) {
+    return [];
+  }
+  
+  const sizeColumns = [];
+  const sizePatterns = ['m', 'l', 'xl', 'xxl', '2xl', '3xl', '4xl', 's', 'xs', 'xxs'];
+  for (let i = 0; i < header.length; i++) {
+    const headerText = String(header[i] || "").trim().toLowerCase();
+    if (sizePatterns.includes(headerText) || 
+        (headerText.match(/^[0-9]+$/) && parseInt(headerText) > 0) ||
+        sizePatterns.some(pattern => headerText === pattern)) {
+      sizeColumns.push(i);
+    }
+  }
+  
+  for (let i = 0; i < header.length; i++) {
+    const headerText = String(header[i] || "").trim();
+    const num = parseFloat(headerText);
+    if (!isNaN(num) && num > 0 && num < 100 && !sizeColumns.includes(i)) {
+      sizeColumns.push(i);
+    }
+  }
+  
+  if (sizeColumns.length === 0) {
+    return [];
+  }
+  
+  const uniqueTables = new Set();
+  for (let r = headerRowIdx + 1; r < windowValues.length; r++) {
+    const row = windowValues[r] || [];
+    if (!row || row.length === 0) continue;
+    
+    const shadeValue = String(row[0] || "").trim().toLowerCase();
+    if (shadeValue === "total" || shadeValue === "totals" || shadeValue === "grand total") {
+      continue;
+    }
+    
+    let hasPositiveData = false;
+    for (const colIdx of sizeColumns) {
+      if (colIdx < row.length) {
+        const raw = row[colIdx];
+        if (raw != null && raw !== "") {
+          const n = parseFloat(String(raw).replace(/,/g, ""));
+          if (!isNaN(n) && n > 0) {
+            hasPositiveData = true;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (hasPositiveData && tableColIndex < row.length) {
+      const tableValue = String(row[tableColIndex] || "").trim();
+      if (tableValue && tableValue !== "" && tableValue !== "0") {
+        const tables = tableValue.split(/[, \s]+/).filter(t => t && t !== "" && t !== "0");
+        tables.forEach(t => uniqueTables.add(t));
+      }
+    }
+  }
+  
+  return Array.from(uniqueTables).sort((a, b) => {
+    const numA = parseFloat(a);
+    const numB = parseFloat(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+    return String(a).localeCompare(String(b));
+  });
+}
+
+async function fetchSheet({ sheetId, range, apiKey }) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}?key=${apiKey}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Sheets API error: ${res.status} ${text}`);
+  }
+  return res.json();
+}
+
+// Caching variables
+let cachedPendingCuttingData = null;
+let lastPendingCuttingFetch = 0;
+const CUTTING_CACHE_TTL = 30000; // 30 seconds
+
+export const getPendingCuttingLots = async (req, res) => {
+  try {
+    const isRefresh = req.query.refresh === 'true';
+    const now = Date.now();
+
+    if (!isRefresh && cachedPendingCuttingData && (now - lastPendingCuttingFetch < CUTTING_CACHE_TTL)) {
+      console.log('[Sheets API] Returning cached pending cutting data...');
+      return res.json({
+        success: true,
+        ...cachedPendingCuttingData
+      });
+    }
+
+    console.log('[Sheets API] Fetching fresh cutting data from Google Sheets...');
+
+    const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
+    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+    const JOB_RANGE = "JobOrder!A:AZ";
+    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+    const INDEX_SHEET_NAME = "Index";
+    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
+    const CUTTING_SHEET_NAME = "Cutting";
+    const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
+
+    // 1. Fetch Job Orders
+    const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
+    let jobRows = convertValuesToObjects(jobRes.values);
+
+    // Filter out cancelled status
+    jobRows = jobRows.filter((r) => {
+      const s = (r.Status ?? "").toString();
+      const sn = norm(s);
+      return !sn.startsWith("cancel");
+    });
+
+    // 2. Fetch Index sheet from Budget Report
+    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+    const idxValues = idxRes.values || [];
+    const idxHeader = idxValues[0] || [];
+    const indexMap = new Map();
+    for (let i = 1; i < idxValues.length; i++) {
+      const entry = parseIndexRow(idxHeader, idxValues[i]);
+      if (entry) indexMap.set(entry.lot, entry);
+    }
+
+    // 3. Fetch large Cutting matrix
+    const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
+    const bigCuttingValues = cuttingRes.values || [];
+
+    // 4. Merge sheets and calculate pending remarks
+    const lots = Array.from(
+      new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
+    );
+
+    const lotToSummary = new Map();
+    const pendingListTmp = {};
+
+    for (const lot of lots) {
+      const ix = indexMap.get(lot);
+      if (!ix) {
+        lotToSummary.set(lot, {
+          totalQty: 0,
+          remarks: "",
+          remarks2: "",
+          remarks3: "Fabric Issue Pending",
+          cuttingDate: "",
+          cuttingTables: []
+        });
+        pendingListTmp[lot] = [];
+        continue;
+      }
+
+      const cuttingDate = formatSavedAtToYMD(ix.savedAt);
+      const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
+      const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
+      const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
+      const cuttingTables = extractCuttingTables(window, ix.sizes);
+
+      const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
+      const pendingList = Array.from(pendingShadeKeys).map(
+        (k) => shadeKeyToOriginal.get(k) || k
+      );
+
+      let remarks = "";
+      let remarks2 = "";
+      let remarks3 = "";
+
+      if (pendingShadeKeys.size > 0) {
+        remarks2 = "Colour Pending";
+      } else {
+        remarks = "Cutting Done";
+      }
+
+      lotToSummary.set(lot, {
+        totalQty,
+        remarks,
+        remarks2,
+        remarks3,
+        cuttingDate,
+        cuttingTables
+      });
+      pendingListTmp[lot] = pendingList;
+    }
+
+    const merged = jobRows.map((r) => {
+      const lot = String(r["Lot No"] || "").trim();
+      const days = daysAfter(r["PO Date"]);
+      const sum = lotToSummary.get(lot) || {
+        totalQty: 0,
+        remarks: "",
+        remarks2: "",
+        remarks3: lot ? "Fabric Issue Pending" : "",
+        cuttingDate: "",
+        cuttingTables: []
+      };
+
+      const remarksList = [sum.remarks, sum.remarks2, sum.remarks3].filter(Boolean);
+      const mergedRemarks = remarksList.join(" | ");
+
+      const cuttingTablesDisplay = sum.cuttingTables && sum.cuttingTables.length > 0
+        ? sum.cuttingTables.join(", ")
+        : "";
+
+      const hasIx = lot ? indexMap.has(lot) : false;
+
+      return {
+        ...r,
+        "Days after PO issue": days ?? "",
+        "Total Qty": sum.totalQty,
+        "Pending Shade": "",
+        "Cutting Date": sum.cuttingDate || "",
+        "Cutting Table": cuttingTablesDisplay,
+        Remarks: mergedRemarks,
+        inIndexSheet: hasIx,
+      };
+    });
+
+    const result = {
+      rows: merged,
+      pendingListByLot: pendingListTmp,
+      lastUpdated: new Date().toLocaleString()
+    };
+
+    cachedPendingCuttingData = result;
+    lastPendingCuttingFetch = now;
+
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error getting pending cutting lots:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };

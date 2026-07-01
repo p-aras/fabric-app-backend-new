@@ -53,28 +53,87 @@ export const findAvailableLocation = async (category) => {
 
 export const getMaterials = async (req, res) => {
   try {
-    const { search, category, status } = req.query;
-    const where = {};
+    const { search, category, status, type } = req.query;
 
+    // 1. Fetch Materials (Normal Inventory and FabricStock(Mtrs))
+    const whereMat = {};
     if (search) {
-      where[Op.or] = [
+      whereMat[Op.or] = [
         { name: { [Op.like]: `%${search}%` } },
         { code: { [Op.like]: `%${search}%` } },
         { location: { [Op.like]: `%${search}%` } }
       ];
     }
     if (category && category !== 'All') {
-      where.category = category;
+      whereMat.category = category;
     }
     if (status && status !== 'All') {
-      where.status = status;
+      whereMat.status = status;
     }
 
     const materials = await Material.findAll({
-      where,
+      where: whereMat,
       order: [['id', 'DESC']]
     });
-    res.json(materials);
+
+    const mappedMaterials = materials.map(m => {
+      const item = m.toJSON ? m.toJSON() : { ...m };
+      item.inventoryType = (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory';
+      item.receivedDate = item.receivedDate || '';
+      return item;
+    });
+
+    // 2. Fetch Dyeing Materials (Dyeing Material)
+    const whereDye = {};
+    if (search) {
+      whereDye[Op.or] = [
+        { fabricName: { [Op.like]: `%${search}%` } },
+        { cmfName: { [Op.like]: `%${search}%` } },
+        { barcodeId: { [Op.like]: `%${search}%` } },
+        { location: { [Op.like]: `%${search}%` } }
+      ];
+    }
+    if (status && status !== 'All') {
+      if (status === 'Active') {
+        whereDye.batchStatus = 'Completed';
+      }
+    }
+
+    const dyeingMaterials = await DyeingMaterial.findAll({
+      where: whereDye,
+      order: [['id', 'DESC']]
+    });
+
+    const mappedDyeing = dyeingMaterials.map(dm => {
+      const item = dm.toJSON ? dm.toJSON() : { ...dm };
+      return {
+        id: `dyeing-${item.id}`,
+        code: item.barcodeId || `DYE-${item.id}`,
+        name: item.fabricName || item.cmfName || 'Dyeing Fabric',
+        category: 'Dyeing',
+        subCategory: item.group || '',
+        color: item.shade || '',
+        supplier: null,
+        weight: parseFloat(item.weight) || 0.00,
+        rolls: 1,
+        unit: 'Roll',
+        location: item.location || '',
+        status: 'Active',
+        lotNo: item.lotNumber || '',
+        receivedDate: item.date || '',
+        inventoryType: 'Dyeing Material',
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt
+      };
+    });
+
+    let combined = [...mappedMaterials, ...mappedDyeing];
+
+    if (type && type !== 'All') {
+      combined = combined.filter(item => item.inventoryType === type);
+    }
+
+    res.json(combined);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -82,6 +141,11 @@ export const getMaterials = async (req, res) => {
 
 export const checkShelfCapacity = async (shelfId, additionalRolls, excludeMaterialId = null, transaction = null) => {
   if (!shelfId) return;
+
+  // Bypass validation for custom locations
+  if (/floor|hall|rack/i.test(shelfId)) {
+    return;
+  }
 
   const shelf = await Shelf.findByPk(shelfId, { transaction });
   if (!shelf) {
