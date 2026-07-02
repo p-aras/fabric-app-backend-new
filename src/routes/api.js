@@ -73,8 +73,19 @@ import {
   issuanceHistory,
   getIssuanceSummary,
   syncOfflineData,
-  getApprovalsByLot
+  getApprovalsByLot,
+  getSupervisorIssuanceReport,
+  getLocationIssuanceReport,
+  getDailyFabricIssuanceReport,
+  getDyeingShortageReport
 } from '../controllers/fabricIssuanceController.js';
+
+import {
+  getTables,
+  addTable,
+  updateTable,
+  deleteTable
+} from '../controllers/tableController.js';
 
 import {
   getIssuedRolls,
@@ -145,6 +156,10 @@ router.get('/issuance-history/:lotNumber', issuanceHistory);
 router.get('/issuance-summary/:lotNumber', getIssuanceSummary);
 router.get('/fabric-approvals/:lotNumber', getApprovalsByLot);
 router.post('/sync-offline-data', syncOfflineData);
+router.get('/reports/supervisor-issuance', getSupervisorIssuanceReport);
+router.get('/reports/location-issuance', getLocationIssuanceReport);
+router.get('/reports/daily-fabric-issuance', getDailyFabricIssuanceReport);
+router.get('/reports/dyeing-shortage', getDyeingShortageReport);
 
 // Fabric Receiving Endpoints
 router.get('/fabric-receiving/issued-rolls/:lotNumber', getIssuedRolls);
@@ -201,5 +216,11 @@ router.delete('/suppliers/:id', deleteSupplier);
 
 // OCR Bill Parser
 router.post('/ocr/parse-bill', upload.single('bill'), parseBillOcr);
+
+// Tables Management
+router.get('/tables', getTables);
+router.post('/tables', addTable);
+router.put('/tables/:id', updateTable);
+router.delete('/tables/:id', deleteTable);
 
 export default router;

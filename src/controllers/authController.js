@@ -394,3 +394,17 @@ export const resetPassword = async (req, res) => {
     res.status(500).json({ error: 'Password reset failed', details: err.message });
   }
 };
+
+// GET USERS LIST (unprotected/accessible for management screens)
+export const getUsers = async (req, res) => {
+  try {
+    const users = await User.findAll({
+      attributes: ['id', 'name', 'email', 'role', 'department', 'status'],
+      order: [['name', 'ASC']]
+    });
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error('[Get Users] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};

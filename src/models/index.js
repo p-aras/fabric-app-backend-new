@@ -209,7 +209,9 @@ export const FabricIssuance = sequelize.define('FabricIssuance', {
   issuedItems: { type: DataTypes.TEXT },
   remarks: { type: DataTypes.TEXT },
   offlineSavedAt: { type: DataTypes.STRING(50) },
-  kharchaItems: { type: DataTypes.TEXT }
+  kharchaItems: { type: DataTypes.TEXT },
+  matchingStatus: { type: DataTypes.STRING(50) },
+  matchingPassedBy: { type: DataTypes.STRING(100) }
 });
 
 // --- FABRIC RETURN MODEL ---
@@ -277,6 +279,20 @@ export const FabricChangeApproval = sequelize.define('FabricChangeApproval', {
   approvedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
 });
 
+// --- FABRIC UNIT CONVERSION LOG MODEL ---
+export const FabricUnitConversionLog = sequelize.define('FabricUnitConversionLog', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  barcodeId: { type: DataTypes.STRING(50), allowNull: false },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  originalWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  originalUnit: { type: DataTypes.STRING(20), defaultValue: 'MTR' },
+  convertedWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  convertedUnit: { type: DataTypes.STRING(20), defaultValue: 'KGS' },
+  issuanceId: { type: DataTypes.STRING(50) },
+  convertedBy: { type: DataTypes.STRING(100) },
+  timestamp: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
+});
+
 // --- INVENTORY MODEL ---
 export const Inventory = sequelize.define('Inventory', {
   id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -302,6 +318,17 @@ export const Inventory = sequelize.define('Inventory', {
 }, {
   tableName: 'inventory',
   timestamps: false
+});
+
+// --- TABLE MODEL ---
+export const Table = sequelize.define('Table', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING, allowNull: false, unique: true },
+  supervisorId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: { model: 'Users', key: 'id' }
+  }
 });
 
 // --- ESTABLISHING RELATIONSHIPS ---
@@ -342,6 +369,10 @@ Issue.belongsTo(Material, { foreignKey: 'materialId', onDelete: 'CASCADE' });
 Material.hasMany(Transfer, { foreignKey: 'materialId', onDelete: 'CASCADE', hooks: true });
 Transfer.belongsTo(Material, { foreignKey: 'materialId', onDelete: 'CASCADE' });
 
+// User -> Tables
+User.hasMany(Table, { foreignKey: 'supervisorId' });
+Table.belongsTo(User, { foreignKey: 'supervisorId', as: 'Supervisor' });
+
 export { sequelize };
 
 export default {
@@ -362,5 +393,7 @@ export default {
   JobOrder,
   Parta,
   Inventory,
-  FabricChangeApproval
+  FabricChangeApproval,
+  Table,
+  FabricUnitConversionLog
 };

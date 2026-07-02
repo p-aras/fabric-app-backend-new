@@ -1173,7 +1173,8 @@ export const findRollByBarcode = async (req, res) => {
           'Status': (dm.status || 'in_stock').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
           'Party': dm.cmfName || '',
           'cmfName': dm.cmfName || '',
-          'Location': dm.location || ''
+          'Location': dm.location || '',
+          'Unit': dm.unit || 'KGS'
         }
       });
     }
@@ -1197,7 +1198,8 @@ export const findRollByBarcode = async (req, res) => {
           'Status': (m.status || 'Active').toLowerCase() === 'issued' ? 'issued' : 'in_stock',
           'Party': m.receivedPerson || '',
           'cmfName': m.receivedPerson || '',
-          'Location': m.location || ''
+          'Location': m.location || '',
+          'Unit': m.unit || 'Roll'
         }
       });
     }
@@ -1221,7 +1223,8 @@ export const findRollByBarcode = async (req, res) => {
           'Status': (parseFloat(inv.bal_wt) <= 0 || (inv.bal_pkgs && parseInt(inv.bal_pkgs) <= 0)) ? 'issued' : 'in_stock',
           'Party': inv.party || '',
           'cmfName': inv.party || '',
-          'Location': inv.location || ''
+          'Location': inv.location || '',
+          'Unit': inv.unit || 'KGS'
         }
       });
     }

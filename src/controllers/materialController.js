@@ -53,10 +53,13 @@ export const findAvailableLocation = async (category) => {
 
 export const getMaterials = async (req, res) => {
   try {
-    const { search, category, status, type } = req.query;
+    const { search, category, status, type, location } = req.query;
 
     // 1. Fetch Materials (Normal Inventory and FabricStock(Mtrs))
     const whereMat = {};
+    if (location) {
+      whereMat.location = location;
+    }
     if (search) {
       whereMat[Op.or] = [
         { name: { [Op.like]: `%${search}%` } },
@@ -85,6 +88,9 @@ export const getMaterials = async (req, res) => {
 
     // 2. Fetch Dyeing Materials (Dyeing Material)
     const whereDye = {};
+    if (location) {
+      whereDye.location = location;
+    }
     if (search) {
       whereDye[Op.or] = [
         { fabricName: { [Op.like]: `%${search}%` } },

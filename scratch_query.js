@@ -1,23 +1,22 @@
 import sequelize from './src/config/db.js';
-import { FabricIssuance, DyeingMaterial, Material, Inventory } from './src/models/index.js';
+import { DyeingMaterial, Material, Inventory } from './src/models/index.js';
 
 async function checkData() {
   try {
     await sequelize.authenticate();
     console.log('Connected to Database.');
 
-    const issuances = await FabricIssuance.findAll({
-      limit: 10,
-      order: [['id', 'DESC']]
+    const dms = await DyeingMaterial.findAll({ limit: 5 });
+    console.log('--- DYEING MATERIALS ---');
+    dms.forEach(dm => {
+      console.log(`Barcode: ${dm.barcodeId}, Unit: ${dm.unit}, Status: ${dm.status}, Shade: ${dm.shade}, Lot: ${dm.lotNumber}, Fabric: ${dm.fabricName}`);
     });
 
-    console.log('--- RECENT FABRIC ISSUANCES ---');
-    for (const iss of issuances) {
-      console.log(`ID: ${iss.id}, Issuance ID: ${iss.issuanceId}, Lot Number: "${iss.lotNumber}", Job Order: "${iss.jobOrderNo}"`);
-      console.log(`Barcode IDs: ${iss.barcodeIds}`);
-      console.log(`Issued Items: ${iss.issuedItems}`);
-      console.log('-----------------------------------');
-    }
+    const invs = await Inventory.findAll({ limit: 5 });
+    console.log('--- INVENTORY ROLLS ---');
+    invs.forEach(inv => {
+      console.log(`Barcode: ${inv.barcode}, Unit: ${inv.unit}, Status: ${inv.bal_wt}, Shade: ${inv.shade}, Lot: ${inv.lot_no}`);
+    });
 
   } catch (err) {
     console.error('Error:', err);

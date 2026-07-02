@@ -68,9 +68,77 @@ const startServer = async () => {
       }
     };
 
+    const cleanupDuplicateIndexes = async () => {
+      try {
+        console.log('Starting pre-sync duplicate index cleanup...');
+        const [tables] = await sequelize.query('SHOW TABLES');
+        for (const tRow of tables) {
+          const tableName = Object.values(tRow)[0];
+          
+          // Get current indexes on the table
+          const [indexes] = await sequelize.query(`SHOW INDEX FROM \`${tableName}\``);
+          
+          const indexGroups = {};
+          for (const idx of indexes) {
+            const keyName = idx.Key_name || idx.key_name;
+            if (!indexGroups[keyName]) {
+              indexGroups[keyName] = {
+                name: keyName,
+                unique: (idx.Non_unique === 0 || idx.non_unique === 0),
+                columns: []
+              };
+            }
+            indexGroups[keyName].columns.push(idx.Column_name || idx.column_name);
+          }
+
+          // We only filter for unique indexes that are not PRIMARY keys
+          const uniqueIndexes = Object.values(indexGroups).filter(
+            idx => idx.unique && idx.name !== 'PRIMARY'
+          );
+
+          // Group by mapped columns to identify duplicates
+          const columnToIndexes = {};
+          for (const idx of uniqueIndexes) {
+            const colKey = idx.columns.join(',');
+            if (!columnToIndexes[colKey]) {
+              columnToIndexes[colKey] = [];
+            }
+            columnToIndexes[colKey].push(idx.name);
+          }
+
+          // Drop duplicate indexes, keeping only one per column combination
+          for (const [colKey, idxNames] of Object.entries(columnToIndexes)) {
+            if (idxNames.length > 1) {
+              console.log(`[Schema Cleanup] Table \`${tableName}\` has duplicate unique indexes for column(s) [${colKey}]: ${idxNames.join(', ')}`);
+              
+              // Prefer keeping the index that matches column name exactly, or just the first index
+              let keepName = idxNames.find(name => name.toLowerCase() === colKey.toLowerCase()) || idxNames[0];
+              console.log(`[Schema Cleanup] => Keeping index: ${keepName}`);
+
+              for (const name of idxNames) {
+                if (name !== keepName) {
+                  try {
+                    console.log(`[Schema Cleanup] => Dropping duplicate index \`${name}\` from \`${tableName}\`...`);
+                    await sequelize.query(`ALTER TABLE \`${tableName}\` DROP INDEX \`${name}\``);
+                    console.log(`[Schema Cleanup]    Dropped \`${name}\` successfully.`);
+                  } catch (err) {
+                    console.log(`[Schema Cleanup] Info: Could not drop index ${name} on ${tableName} (non-fatal):`, err.message);
+                  }
+                }
+              }
+            }
+          }
+        }
+        console.log('Pre-sync duplicate index cleanup complete.');
+      } catch (err) {
+        console.log('Info: Pre-sync index cleanup bypassed or failed:', err.message);
+      }
+    };
+
     if (dialect === 'mysql') {
       await dropLocationFks('Materials');
       await dropLocationFks('DyeingMaterials');
+      await cleanupDuplicateIndexes();
     }
 
     // Sync models (creates MySQL tables if they do not exist)
