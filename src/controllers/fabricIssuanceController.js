@@ -1,4 +1,4 @@
-import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize } from '../models/index.js';
+import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize, User, Table } from '../models/index.js';
 import { addAuditLog } from './materialController.js';
 import { Op } from 'sequelize';
 
@@ -786,6 +786,108 @@ export const getLocationIssuanceReport = async (req, res) => {
     res.json({ success: true, data: report });
   } catch (error) {
     console.error('[Location Issuance Report] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET CUTTER MASTER WISE ISSUANCE REPORT
+export const getCutterMasterIssuanceReport = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    let whereClause = {};
+    if (startDate || endDate) {
+      whereClause.issuedAt = {};
+      if (startDate) {
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        whereClause.issuedAt[Op.gte] = start.toISOString();
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        whereClause.issuedAt[Op.lte] = end.toISOString();
+      }
+    }
+
+    const [issuances, tables] = await Promise.all([
+      FabricIssuance.findAll({
+        where: whereClause,
+        order: [['issuedAt', 'DESC']]
+      }),
+      Table.findAll({
+        include: [
+          { model: User, as: 'Supervisor', attributes: ['name'] },
+          { model: User, as: 'CutterMaster', attributes: ['name'] }
+        ]
+      })
+    ]);
+
+    // Map table name to table details for fast O(1) matching
+    const tableMap = {};
+    tables.forEach(t => {
+      if (t.name) {
+        tableMap[t.name.toLowerCase().trim()] = t;
+      }
+    });
+
+    const report = [];
+
+    for (const issuance of issuances) {
+      const date = issuance.issuedAt ? issuance.issuedAt.slice(0, 10) : '';
+      
+      let items = [];
+      try {
+        items = issuance.issuedItems ? JSON.parse(issuance.issuedItems) : [];
+      } catch (err) {
+        console.error("Error parsing issuedItems in CutterMasterReport:", err);
+      }
+
+      if (!Array.isArray(items)) {
+        items = [];
+      }
+
+      if (items.length === 0) {
+        report.push({
+          id: `${issuance.id}-fallback`,
+          date,
+          cutterMaster: 'Unassigned',
+          supervisor: 'Unassigned',
+          tableNumber: 'Not Assigned',
+          rolls: issuance.totalQuantity || 0,
+          weight: parseFloat(issuance.totalWeight) || 0,
+          fabric: issuance.fabric || '—',
+          lotNumber: issuance.lotNumber || '—',
+          shade: '—'
+        });
+      } else {
+        items.forEach((item, itemIdx) => {
+          const itemTableStr = String(item.tableNumber || '').trim();
+          const tableKey = itemTableStr.toLowerCase();
+          const tableObj = tableMap[tableKey];
+
+          const cutterMaster = tableObj && tableObj.CutterMaster ? tableObj.CutterMaster.name : 'Unassigned';
+          const supervisor = tableObj && tableObj.Supervisor ? tableObj.Supervisor.name : 'Unassigned';
+
+          report.push({
+            id: `${issuance.id}-${itemIdx}`,
+            date,
+            cutterMaster,
+            supervisor,
+            tableNumber: itemTableStr || 'Not Assigned',
+            rolls: parseInt(item.qty || item.quantity) || 0,
+            weight: parseFloat(item.weight) || 0,
+            fabric: issuance.fabric || '—',
+            lotNumber: issuance.lotNumber || '—',
+            shade: item.shade || '—'
+          });
+        });
+      }
+    }
+
+    res.json({ success: true, data: report });
+  } catch (error) {
+    console.error('[Cutter Master Issuance Report] Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

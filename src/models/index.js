@@ -328,6 +328,11 @@ export const Table = sequelize.define('Table', {
     type: DataTypes.INTEGER,
     allowNull: true,
     references: { model: 'Users', key: 'id' }
+  },
+  cutterMasterId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: { model: 'Users', key: 'id' }
   }
 });
 
@@ -372,6 +377,7 @@ Transfer.belongsTo(Material, { foreignKey: 'materialId', onDelete: 'CASCADE' });
 // User -> Tables
 User.hasMany(Table, { foreignKey: 'supervisorId' });
 Table.belongsTo(User, { foreignKey: 'supervisorId', as: 'Supervisor' });
+Table.belongsTo(User, { foreignKey: 'cutterMasterId', as: 'CutterMaster' });
 
 export { sequelize };
 

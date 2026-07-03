@@ -77,7 +77,8 @@ import {
   getSupervisorIssuanceReport,
   getLocationIssuanceReport,
   getDailyFabricIssuanceReport,
-  getDyeingShortageReport
+  getDyeingShortageReport,
+  getCutterMasterIssuanceReport
 } from '../controllers/fabricIssuanceController.js';
 
 import {
@@ -160,6 +161,7 @@ router.get('/reports/supervisor-issuance', getSupervisorIssuanceReport);
 router.get('/reports/location-issuance', getLocationIssuanceReport);
 router.get('/reports/daily-fabric-issuance', getDailyFabricIssuanceReport);
 router.get('/reports/dyeing-shortage', getDyeingShortageReport);
+router.get('/reports/cutter-master-issuance', getCutterMasterIssuanceReport);
 
 // Fabric Receiving Endpoints
 router.get('/fabric-receiving/issued-rolls/:lotNumber', getIssuedRolls);

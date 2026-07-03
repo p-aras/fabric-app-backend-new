@@ -1,28 +1,20 @@
 import sequelize from './src/config/db.js';
-import { DyeingMaterial, Material, Inventory } from './src/models/index.js';
+import { User, Table } from './src/models/index.js';
 
-async function checkData() {
+async function main() {
   try {
     await sequelize.authenticate();
-    console.log('Connected to Database.');
-
-    const dms = await DyeingMaterial.findAll({ limit: 5 });
-    console.log('--- DYEING MATERIALS ---');
-    dms.forEach(dm => {
-      console.log(`Barcode: ${dm.barcodeId}, Unit: ${dm.unit}, Status: ${dm.status}, Shade: ${dm.shade}, Lot: ${dm.lotNumber}, Fabric: ${dm.fabricName}`);
-    });
-
-    const invs = await Inventory.findAll({ limit: 5 });
-    console.log('--- INVENTORY ROLLS ---');
-    invs.forEach(inv => {
-      console.log(`Barcode: ${inv.barcode}, Unit: ${inv.unit}, Status: ${inv.bal_wt}, Shade: ${inv.shade}, Lot: ${inv.lot_no}`);
-    });
-
+    console.log('DB Connection established.');
+    const users = await User.findAll({ attributes: ['id', 'name', 'role', 'department'] });
+    console.log('USERS IN DB:');
+    console.log(JSON.stringify(users, null, 2));
+    const tables = await Table.findAll();
+    console.log('TABLES IN DB:');
+    console.log(JSON.stringify(tables, null, 2));
   } catch (err) {
-    console.error('Error:', err);
+    console.error(err);
   } finally {
-    process.exit();
+    await sequelize.close();
   }
 }
-
-checkData();
+main();
