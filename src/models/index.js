@@ -91,7 +91,8 @@ export const Material = sequelize.define('Material', {
   receivedPerson: { type: DataTypes.STRING },
   authorizedPerson: { type: DataTypes.STRING },
   receivedDate: { type: DataTypes.DATEONLY },
-  lotNo: { type: DataTypes.STRING(50) }
+  lotNo: { type: DataTypes.STRING(50) },
+  poNumber: { type: DataTypes.STRING(100), allowNull: true }
 });
 
 // --- GRN MODEL ---
@@ -256,7 +257,9 @@ export const JobOrder = sequelize.define('JobOrder', {
   section: { type: DataTypes.STRING(100) },
   season: { type: DataTypes.STRING(100) },
   pattern: { type: DataTypes.STRING(100) },
-  style: { type: DataTypes.STRING(100) }
+  style: { type: DataTypes.STRING(100) },
+  priority: { type: DataTypes.STRING(50) },
+  fetchedFromSheet: { type: DataTypes.BOOLEAN, defaultValue: false }
 });
 
 // --- PARTA MODEL ---

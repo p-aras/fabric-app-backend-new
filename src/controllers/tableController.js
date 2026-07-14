@@ -3,15 +3,13 @@ import { Table, User } from '../models/index.js';
 // 1. GET ALL TABLES (Auto-seed default Table 1 to 12 if table count is 0)
 export const getTables = async (req, res) => {
   try {
-    // Check if tables table is empty
-    const count = await Table.count();
-    if (count === 0) {
-      console.log('🌱 [Table Seeder] No tables found. Seeding default Table 1 to Table 12...');
-      const defaultTables = Array.from({ length: 12 }, (_, i) => ({
-        name: `Table ${i + 1}`,
-        supervisorId: null
-      }));
-      await Table.bulkCreate(defaultTables);
+    // Self-healing: Check and seed Table 1 to Table 20 if missing
+    for (let i = 1; i <= 20; i++) {
+      const tableName = `Table ${i}`;
+      await Table.findOrCreate({
+        where: { name: tableName },
+        defaults: { supervisorId: null }
+      });
     }
 
     const tables = await Table.findAll({
@@ -19,8 +17,14 @@ export const getTables = async (req, res) => {
         model: User,
         as: 'Supervisor',
         attributes: ['id', 'name', 'email']
-      }],
-      order: [['name', 'ASC']]
+      }]
+    });
+
+    // Sort numerically: Table 1, Table 2, ..., Table 10, Table 11, ..., Table 20
+    tables.sort((a, b) => {
+      const numA = parseInt(a.name.replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt(b.name.replace(/\D/g, ''), 10) || 0;
+      return numA - numB;
     });
 
     res.json({ success: true, data: tables });

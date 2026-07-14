@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import sequelize from '../config/db.js';
+import { FabricIssuance, DyeingMaterial, Material } from '../models/index.js';
 
 // Import routes
 import authRoutes from './auth.js';
@@ -64,7 +65,10 @@ import {
   searchJobOrderByLot,
   findRollByBarcode,
   getPendingCuttingLots,
-  getDailyInventoryReport
+  getDailyInventoryReport,
+  fetchPoDetails,
+  fetchPoAuditReport,
+  fetchIssuedLots
 } from '../controllers/sheetsController.js';
 
 import {
@@ -104,6 +108,12 @@ import {
   getPartaPendingReport
 } from '../controllers/partaController.js';
 
+import {
+  nextReAddBarcodeId,
+  storeReAddMaterialData,
+  completeReAddBatch
+} from '../controllers/reAddMaterialController.js';
+
 // Import auth middleware
 import { authMiddleware } from '../middleware/auth.js';
 
@@ -126,6 +136,47 @@ router.get('/test-connection', async (req, res) => {
   }
 });
 
+router.get('/debug-lot/:lotNumber', async (req, res) => {
+  try {
+    const { lotNumber } = req.params;
+    const issuances = await FabricIssuance.findAll({ where: { lotNumber: String(lotNumber) } });
+    const barcodeSet = new Set();
+    issuances.forEach(iss => {
+      if (iss.barcodeIds) {
+        try {
+          const ids = JSON.parse(iss.barcodeIds);
+          if (Array.isArray(ids)) ids.forEach(id => barcodeSet.add(id));
+        } catch (e) {}
+      }
+    });
+    const barcodeIds = Array.from(barcodeSet);
+    const dyeingMaterials = await DyeingMaterial.findAll({ where: { barcodeId: barcodeIds } });
+    const materials = await Material.findAll({ where: { code: barcodeIds } });
+    res.json({
+      success: true,
+      lotNumber,
+      issuancesCount: issuances.length,
+      barcodeIdsCount: barcodeIds.length,
+      barcodeIds,
+      dyeingMaterialsFound: dyeingMaterials.length,
+      materialsFound: materials.length,
+      dyeingMaterials: dyeingMaterials.map(d => ({ barcodeId: d.barcodeId, shade: d.shade, weight: d.weight, status: d.status })),
+      materials: materials.map(m => ({ code: m.code, name: m.name, weight: m.weight }))
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/debug-issuances', async (req, res) => {
+  try {
+    const issuances = await FabricIssuance.findAll({ raw: true });
+    res.json({ count: issuances.length, sample: issuances.slice(0, 100) });
+  } catch (err) {
+    res.json({ error: err.message, stack: err.stack });
+  }
+});
+
 // Google Sheets / Barcode generation endpoints (unprotected)
 router.get('/google-sheets/next-barcode-id', nextBarcodeId);
 router.get('/google-sheets/fetch-dyeing-lot-details', fetchDyeingLotDetails);
@@ -133,6 +184,7 @@ router.get('/google-sheets/fetch-by-lot/:lotNo(*)', fetchSheetDataByLot);
 router.get('/google-sheets/job-orders', fetchJobOrders);
 router.get('/google-sheets/fabric-rolls', fetchInventoryRolls);
 router.get('/google-sheets/pending-cutting', getPendingCuttingLots);
+router.get('/google-sheets/issued-lots', fetchIssuedLots);
 
 router.get('/inventory', getRawInventory);
 router.get('/reports/daily-inventory-quantity', getDailyInventoryReport);
@@ -141,6 +193,16 @@ router.get('/google-sheets/fabric-roll/:barcodeId', findRollByBarcode);
 router.post('/google-sheets/store-fabric-data', storeFabricData);
 router.post('/google-sheets/store-dyeing-data', storeDyeingData);
 router.post('/batch/complete', completeBatch);
+
+// Re-Add Material endpoints (unprotected)
+router.get('/re-add-material/next-barcode-id', nextReAddBarcodeId);
+router.post('/re-add-material/store', storeReAddMaterialData);
+router.post('/re-add-material/complete-batch', completeReAddBatch);
+
+// Purchase Order fetch and audit endpoints
+router.get('/po/details/:poNumber', fetchPoDetails);
+router.get('/po/audit', fetchPoAuditReport);
+
 
 // Local Parta CRUD endpoints (saves in MySQL if kharcha is 0)
 router.post('/parta/save', savePartaData);
@@ -162,7 +224,6 @@ router.get('/reports/location-issuance', getLocationIssuanceReport);
 router.get('/reports/daily-fabric-issuance', getDailyFabricIssuanceReport);
 router.get('/reports/dyeing-shortage', getDyeingShortageReport);
 router.get('/reports/cutter-master-issuance', getCutterMasterIssuanceReport);
-
 // Fabric Receiving Endpoints
 router.get('/fabric-receiving/issued-rolls/:lotNumber', getIssuedRolls);
 router.get('/fabric-receiving/receiving-history', getAllReceivingHistory);

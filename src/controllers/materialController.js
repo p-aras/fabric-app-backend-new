@@ -1,4 +1,4 @@
-import { Material, Room, Shelf, AuditLog, DyeingMaterial } from '../models/index.js';
+import { Material, Room, Shelf, AuditLog, DyeingMaterial, Supplier } from '../models/index.js';
 import { Op } from 'sequelize';
 
 // Audit Log Helper
@@ -53,29 +53,19 @@ export const findAvailableLocation = async (category) => {
 
 export const getMaterials = async (req, res) => {
   try {
-    const { search, category, status, type, location } = req.query;
+    const page = req.query.page ? parseInt(req.query.page) : null;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 50;
+
+    // Load all Suppliers for mapping ID to Name
+    const suppliers = await Supplier.findAll();
+    const supplierMap = {};
+    suppliers.forEach(s => {
+      supplierMap[s.id] = s.name;
+    });
+    const getSupplierName = (id) => supplierMap[id] || '—';
 
     // 1. Fetch Materials (Normal Inventory and FabricStock(Mtrs))
-    const whereMat = {};
-    if (location) {
-      whereMat.location = location;
-    }
-    if (search) {
-      whereMat[Op.or] = [
-        { name: { [Op.like]: `%${search}%` } },
-        { code: { [Op.like]: `%${search}%` } },
-        { location: { [Op.like]: `%${search}%` } }
-      ];
-    }
-    if (category && category !== 'All') {
-      whereMat.category = category;
-    }
-    if (status && status !== 'All') {
-      whereMat.status = status;
-    }
-
     const materials = await Material.findAll({
-      where: whereMat,
       order: [['id', 'DESC']]
     });
 
@@ -87,26 +77,7 @@ export const getMaterials = async (req, res) => {
     });
 
     // 2. Fetch Dyeing Materials (Dyeing Material)
-    const whereDye = {};
-    if (location) {
-      whereDye.location = location;
-    }
-    if (search) {
-      whereDye[Op.or] = [
-        { fabricName: { [Op.like]: `%${search}%` } },
-        { cmfName: { [Op.like]: `%${search}%` } },
-        { barcodeId: { [Op.like]: `%${search}%` } },
-        { location: { [Op.like]: `%${search}%` } }
-      ];
-    }
-    if (status && status !== 'All') {
-      if (status === 'Active') {
-        whereDye.batchStatus = 'Completed';
-      }
-    }
-
     const dyeingMaterials = await DyeingMaterial.findAll({
-      where: whereDye,
       order: [['id', 'DESC']]
     });
 
@@ -124,7 +95,7 @@ export const getMaterials = async (req, res) => {
         rolls: 1,
         unit: 'Roll',
         location: item.location || '',
-        status: 'Active',
+        status: item.batchStatus === 'Completed' ? 'Active' : 'Inactive',
         lotNo: item.lotNumber || '',
         receivedDate: item.date || '',
         inventoryType: 'Dyeing Material',
@@ -135,11 +106,102 @@ export const getMaterials = async (req, res) => {
 
     let combined = [...mappedMaterials, ...mappedDyeing];
 
-    if (type && type !== 'All') {
-      combined = combined.filter(item => item.inventoryType === type);
-    }
+    // Compute unique filter options from the entire unfiltered combined list
+    const filterOptions = {
+      categories: [...new Set(combined.map(m => m.category).filter(Boolean))].sort(),
+      colors: [...new Set(combined.map(m => m.color).filter(Boolean))].sort(),
+      locations: [...new Set(combined.map(m => m.location).filter(Boolean))].sort(),
+      names: [...new Set(combined.map(m => m.name).filter(Boolean))].sort(),
+      subCategories: [...new Set(combined.map(m => m.subCategory).filter(Boolean))].sort(),
+      suppliers: [...new Set(suppliers.map(s => s.name).filter(Boolean))].sort()
+    };
 
-    res.json(combined);
+    // Apply filters in JS
+    const parseQueryArray = (val) => {
+      if (!val) return [];
+      return val.split(',').map(v => v.trim()).filter(Boolean);
+    };
+
+    const searchQ = req.query.search ? req.query.search.toLowerCase() : '';
+    const selCats = parseQueryArray(req.query.category);
+    const selSubCats = parseQueryArray(req.query.subCategory);
+    const selStatuses = parseQueryArray(req.query.status);
+    const selSuppliers = parseQueryArray(req.query.supplier);
+    const selColors = parseQueryArray(req.query.color);
+    const selLocations = parseQueryArray(req.query.location);
+    const selNames = parseQueryArray(req.query.name);
+    const selTypes = parseQueryArray(req.query.type);
+    const startDate = req.query.startDate || '';
+    const endDate = req.query.endDate || '';
+
+    let filtered = combined.filter(m => {
+      // 1. Search Query
+      const matchQ = !searchQ || 
+        (m.name && m.name.toLowerCase().includes(searchQ)) || 
+        (m.code && m.code.toLowerCase().includes(searchQ)) || 
+        (m.location && m.location.toLowerCase().includes(searchQ));
+
+      // 2. Categories
+      const matchCat = selCats.length === 0 || selCats.includes(m.category);
+
+      // 3. Subcategories
+      const matchSubCat = selSubCats.length === 0 || selSubCats.includes(m.subCategory);
+
+      // 4. Status
+      const matchStatus = selStatuses.length === 0 || selStatuses.includes(m.status);
+
+      // 5. Suppliers
+      const matchSupplier = selSuppliers.length === 0 || selSuppliers.includes(getSupplierName(m.supplier));
+
+      // 6. Colors
+      const matchColor = selColors.length === 0 || selColors.includes(m.color);
+
+      // 7. Locations
+      const matchLocation = selLocations.length === 0 || selLocations.includes(m.location);
+
+      // 8. Names
+      const matchName = selNames.length === 0 || selNames.includes(m.name);
+
+      // 9. Types
+      const matchType = selTypes.length === 0 || selTypes.includes(m.inventoryType);
+
+      // 10. Date Range
+      let matchDate = true;
+      if (m.receivedDate) {
+        let itemDateStr = m.receivedDate;
+        if (/^\d{2}-\d{2}-\d{4}$/.test(itemDateStr)) {
+          const parts = itemDateStr.split('-');
+          itemDateStr = `${parts[2]}-${parts[1]}-${parts[0]}`;
+        }
+        if (itemDateStr.includes('T')) {
+          itemDateStr = itemDateStr.split('T')[0];
+        }
+        if (startDate && itemDateStr < startDate) matchDate = false;
+        if (endDate && itemDateStr > endDate) matchDate = false;
+      } else {
+        if (startDate || endDate) matchDate = false;
+      }
+
+      return matchQ && matchCat && matchSubCat && matchStatus && matchSupplier && matchColor && matchLocation && matchName && matchType && matchDate;
+    });
+
+    if (page !== null) {
+      // Pagination requested
+      const offset = (page - 1) * limit;
+      const paginatedData = filtered.slice(offset, offset + limit);
+      res.json({
+        success: true,
+        data: paginatedData,
+        totalCount: filtered.length,
+        totalPages: Math.ceil(filtered.length / limit),
+        currentPage: page,
+        limit,
+        filterOptions
+      });
+    } else {
+      // Flat array (backward compatibility)
+      res.json(filtered);
+    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -195,7 +257,7 @@ export const addMaterial = async (req, res) => {
     const lastDyeingId = lastDyeing ? getNumericId(lastDyeing.barcodeId) : 0;
     const lastId = Math.max(lastMatId, lastDyeingId);
     const newCode = `MAT${String(lastId + 1).padStart(5, '0')}`;
-    
+
     let location = req.body.location;
     if (!location) {
       location = await findAvailableLocation(req.body.category);
@@ -222,7 +284,7 @@ export const updateMaterial = async (req, res) => {
     const { id } = req.params;
     const material = await Material.findByPk(id);
     if (!material) return res.status(404).json({ error: 'Material not found' });
-    
+
     const targetLocation = req.body.location !== undefined ? req.body.location : material.location;
     const targetRolls = req.body.rolls !== undefined ? parseInt(req.body.rolls) || 0 : material.rolls;
     await checkShelfCapacity(targetLocation, targetRolls, material.id);
@@ -239,7 +301,7 @@ export const deleteMaterial = async (req, res) => {
     const { id } = req.params;
     const material = await Material.findByPk(id);
     if (!material) return res.status(404).json({ error: 'Material not found' });
-    
+
     await material.destroy();
     res.json({ success: true });
   } catch (error) {

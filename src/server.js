@@ -3,6 +3,12 @@ import dotenv from 'dotenv';
 import app from './app.js';
 import sequelize, { getActiveDialect } from './config/db.js';
 import { seedDatabase } from './config/seed.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -74,10 +80,10 @@ const startServer = async () => {
         const [tables] = await sequelize.query('SHOW TABLES');
         for (const tRow of tables) {
           const tableName = Object.values(tRow)[0];
-          
+
           // Get current indexes on the table
           const [indexes] = await sequelize.query(`SHOW INDEX FROM \`${tableName}\``);
-          
+
           const indexGroups = {};
           for (const idx of indexes) {
             const keyName = idx.Key_name || idx.key_name;
@@ -110,7 +116,7 @@ const startServer = async () => {
           for (const [colKey, idxNames] of Object.entries(columnToIndexes)) {
             if (idxNames.length > 1) {
               console.log(`[Schema Cleanup] Table \`${tableName}\` has duplicate unique indexes for column(s) [${colKey}]: ${idxNames.join(', ')}`);
-              
+
               // Prefer keeping the index that matches column name exactly, or just the first index
               let keepName = idxNames.find(name => name.toLowerCase() === colKey.toLowerCase()) || idxNames[0];
               console.log(`[Schema Cleanup] => Keeping index: ${keepName}`);
@@ -142,7 +148,7 @@ const startServer = async () => {
     }
 
     // Sync models (creates MySQL tables if they do not exist)
-    await sequelize.sync({ alter: true });
+    await sequelize.sync();
     console.log('Database tables synchronized.');
 
     // Ensure lotNo column exists on Materials table
@@ -150,14 +156,35 @@ const startServer = async () => {
       await sequelize.query('ALTER TABLE `Materials` ADD COLUMN `lotNo` VARCHAR(50) NULL');
       console.log('Database schema updated: lotNo column added to Materials.');
     } catch (err) {
-      if (err.message.includes('duplicate column') || err.message.includes('already exists') || err.message.includes('Duplicate column')) {
-        console.log('Database schema verification: lotNo column already exists.');
-      } else {
-        console.error('Failed to ensure lotNo column on Materials table:', err);
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `materials` ADD COLUMN `lotNo` VARCHAR(50) NULL');
+          console.log('Database schema updated: lotNo column added to materials (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure lotNo column on materials table (both cases):', subErr);
+          }
+        }
       }
     }
 
     // Ensure requiredShade and scannedShade columns exist on FabricChangeApprovals table
+    try {
+      await sequelize.query('ALTER TABLE `Materials` ADD COLUMN `poNumber` VARCHAR(100) NULL');
+      console.log('Database schema updated: poNumber column added to Materials.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `materials` ADD COLUMN `poNumber` VARCHAR(100) NULL');
+          console.log('Database schema updated: poNumber column added to materials (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure poNumber column on materials table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
     try {
       await sequelize.query('ALTER TABLE `FabricChangeApprovals` ADD COLUMN `requiredShade` VARCHAR(255) NULL');
       console.log('Database schema updated: requiredShade column added to FabricChangeApprovals.');
@@ -176,8 +203,64 @@ const startServer = async () => {
       }
     }
 
+    try {
+      await sequelize.query('ALTER TABLE `JobOrders` ADD COLUMN `fetchedFromSheet` TINYINT(1) DEFAULT 0');
+      console.log('Database schema updated: fetchedFromSheet column added to JobOrders.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `joborders` ADD COLUMN `fetchedFromSheet` TINYINT(1) DEFAULT 0');
+          console.log('Database schema updated: fetchedFromSheet column added to joborders (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure fetchedFromSheet column on JobOrders table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
+    try {
+      await sequelize.query('ALTER TABLE `JobOrders` ADD COLUMN `priority` VARCHAR(50) NULL');
+      console.log('Database schema updated: priority column added to JobOrders.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `joborders` ADD COLUMN `priority` VARCHAR(50) NULL');
+          console.log('Database schema updated: priority column added to joborders (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure priority column on JobOrders table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
     // Seed defaults if database tables are empty
     await seedDatabase();
+
+    try {
+      const { Material: TestMaterial, DyeingMaterial: TestDyeingMaterial } = await import('./models/index.js');
+      const { Op: TestOp } = await import('sequelize');
+      const testMatList = await TestMaterial.findAll({
+        where: { code: { [TestOp.like]: '9%' } }
+      });
+      const testDyeList = await TestDyeingMaterial.findAll({
+        where: { barcodeId: { [TestOp.like]: '9%' } }
+      });
+      let logMsg = `MATERIALS starting with 9:\n`;
+      testMatList.forEach(m => {
+        logMsg += `- Code: ${m.code}, Name: ${m.name}, Lot: ${m.lotNo}, Location: ${m.location}\n`;
+      });
+      logMsg += `\nDYEING MATERIALS starting with 9:\n`;
+      testDyeList.forEach(d => {
+        logMsg += `- Barcode: ${d.barcodeId}, Lot: ${d.lotNumber}\n`;
+      });
+      fs.writeFileSync(path.join(__dirname, '../diagnostic_db_error.log'), logMsg);
+      console.log('✅ Diagnostic DB 9-series scan complete');
+    } catch (err) {
+      fs.writeFileSync(path.join(__dirname, '../diagnostic_db_error.log'), `ERROR:\nName: ${err.name}\nMessage: ${err.message}\nStack:\n${err.stack}`);
+      console.error('❌ Diagnostic DB test fail: ', err.message);
+    }
 
     // Start Express listener
     app.listen(PORT, () => {

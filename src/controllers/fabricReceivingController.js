@@ -21,7 +21,9 @@ export const getIssuedRolls = async (req, res) => {
 
     // Step 2: Extract all unique barcode IDs issued for this lot
     const barcodeSet = new Set();
+    const issuanceIds = [];
     issuances.forEach(iss => {
+      if (iss.issuanceId) issuanceIds.push(iss.issuanceId);
       if (iss.barcodeIds) {
         try {
           const ids = JSON.parse(iss.barcodeIds);
@@ -35,51 +37,7 @@ export const getIssuedRolls = async (req, res) => {
     });
 
     const barcodeIds = Array.from(barcodeSet);
-    console.log(`🔍 Found ${barcodeIds.length} unique barcodes issued for Lot ${lotNumber}:`, barcodeIds);
-
-    // Helper to find exact issued shade for a barcode
-    const findExactIssuedShade = (barcode) => {
-      for (const iss of issuances) {
-        if (iss.issuedItems) {
-          try {
-            const items = JSON.parse(iss.issuedItems);
-            if (Array.isArray(items)) {
-              const match = items.find(it => {
-                const bcs = it.barcodeIds || [];
-                return bcs.includes(barcode);
-              });
-              if (match && match.shade) {
-                return match.shade;
-              }
-            }
-          } catch (e) {
-            console.error('Error parsing issuedItems in findExactIssuedShade:', e);
-          }
-        }
-      }
-      return null;
-    };
-
-    if (barcodeIds.length === 0) {
-      return res.json({
-        success: true,
-        data: []
-      });
-    }
-
-    // Step 3: Find these rolls in DyeingMaterial table
-    const rolls = await DyeingMaterial.findAll({
-      where: {
-        barcodeId: barcodeIds
-      }
-    });
-
-    // Also check the Material table in case some rolls are stored there
-    const materials = await Material.findAll({
-      where: {
-        code: barcodeIds
-      }
-    });
+    console.log(`🔍 Found ${barcodeIds.length} unique barcodes issued for Lot ${lotNumber}`);
 
     // Find all returns for this lot to calculate total returned weights
     const returns = await FabricReturn.findAll({
@@ -88,131 +46,158 @@ export const getIssuedRolls = async (req, res) => {
       }
     });
 
-    // Map DyeingMaterial rolls
-    const mappedDyeing = rolls.map(roll => {
-      const rollReturns = returns.filter(r => r.originalBarcodeId === roll.barcodeId);
-      const totalReturned = rollReturns.reduce((sum, r) => sum + parseFloat(r.returnedWeight || r.weight || 0), 0);
-      const originalIssuedWeight = parseFloat(roll.weight) || 0;
-
-      // Status should be set properly based on returns
-      let displayStatus = roll.status;
-      if (totalReturned >= originalIssuedWeight) {
-        displayStatus = 'returned';
-      } else if (totalReturned > 0) {
-        displayStatus = 'partially_issued';
-      }
-
-      return {
-        id: roll.id,
-        barcodeId: roll.barcodeId,
-        fabricName: roll.fabricName || 'Dyeing Fabric',
-        shade: findExactIssuedShade(roll.barcodeId) || roll.shade || 'N/A',
-        cmfName: roll.cmfName || roll.party || '',
-        party: roll.cmfName || roll.party || '',
-        originalIssuedWeight: originalIssuedWeight,
-        totalReturnedWeight: totalReturned,
-        fabricUsedForCutting: Math.max(0, originalIssuedWeight - totalReturned),
-        status: displayStatus,
-        availableToReturn: Math.max(0, originalIssuedWeight - totalReturned),
-        weight: originalIssuedWeight,
-        remainingWeight: Math.max(0, originalIssuedWeight - totalReturned)
-      };
-    });
-
-    // Map Material rolls (in case some rolls are only in Material table)
-    const mappedMaterial = materials.filter(mat => !rolls.some(r => r.barcodeId === mat.code)).map(mat => {
-      const rollReturns = returns.filter(r => r.originalBarcodeId === mat.code);
-      const totalReturned = rollReturns.reduce((sum, r) => sum + parseFloat(r.returnedWeight || r.weight || 0), 0);
-      const originalIssuedWeight = parseFloat(mat.weight) || 0;
-
-      let displayStatus = mat.status;
-      if (totalReturned >= originalIssuedWeight) {
-        displayStatus = 'returned';
-      } else if (totalReturned > 0) {
-        displayStatus = 'partially_issued';
-      }
-
-      return {
-        id: mat.id,
-        barcodeId: mat.code,
-        fabricName: mat.name || 'Material Fabric',
-        shade: findExactIssuedShade(mat.code) || mat.color || 'N/A',
-        cmfName: mat.receivedPerson || '',
-        party: mat.receivedPerson || '',
-        originalIssuedWeight: originalIssuedWeight,
-        totalReturnedWeight: totalReturned,
-        fabricUsedForCutting: Math.max(0, originalIssuedWeight - totalReturned),
-        status: displayStatus,
-        availableToReturn: Math.max(0, originalIssuedWeight - totalReturned),
-        weight: originalIssuedWeight,
-        remainingWeight: Math.max(0, originalIssuedWeight - totalReturned)
-      };
-    });
-
-    // Step 4: Also fetch issued rolls from the Inventory table directly
-    const issuanceIds = issuances.map(iss => iss.issuanceId).filter(Boolean);
-    const orConditions = [
-      {
-        lot_no: String(lotNumber),
-        [Op.or]: [
-          { bal_pkgs: '0' },
-          { issue_pkgs: '1' }
-        ]
-      }
-    ];
-
+    // Query databases to build a map of barcode -> actual details
+    const barcodeMap = {};
+    
     if (barcodeIds.length > 0) {
-      orConditions.push({ barcode: barcodeIds });
-    }
-    if (issuanceIds.length > 0) {
-      orConditions.push({ issue_no: issuanceIds });
+      const dyeingRolls = await DyeingMaterial.findAll({ where: { barcodeId: barcodeIds } });
+      dyeingRolls.forEach(r => {
+        barcodeMap[r.barcodeId] = {
+          id: r.id,
+          weight: parseFloat(r.weight) || 0,
+          fabricName: r.fabricName || 'Dyeing Fabric',
+          shade: r.shade,
+          status: r.status,
+          cmfName: r.cmfName || r.party || '',
+          party: r.cmfName || r.party || ''
+        };
+      });
+
+      const materialRolls = await Material.findAll({ where: { code: barcodeIds } });
+      materialRolls.forEach(m => {
+        if (!barcodeMap[m.code]) {
+          barcodeMap[m.code] = {
+            id: m.id,
+            weight: parseFloat(m.weight) || 0,
+            fabricName: m.name || 'Material Fabric',
+            shade: m.color,
+            status: m.status,
+            cmfName: m.receivedPerson || '',
+            party: m.receivedPerson || ''
+          };
+        }
+      });
     }
 
-    const invIssuedRolls = await Inventory.findAll({
-      where: {
-        [Op.or]: orConditions
+    // Also look up in Inventory
+    const orConditions = [{ lot_no: String(lotNumber) }];
+    if (barcodeIds.length > 0) orConditions.push({ barcode: barcodeIds });
+    if (issuanceIds.length > 0) orConditions.push({ issue_no: issuanceIds });
+
+    const invIssuedRolls = await Inventory.findAll({ where: { [Op.or]: orConditions } });
+    invIssuedRolls.forEach(r => {
+      if (r.barcode && !barcodeMap[r.barcode]) {
+        barcodeMap[r.barcode] = {
+          id: r.id,
+          weight: parseFloat(r.issue_wt || r.mrn_wt || 0),
+          fabricName: r.item_description || 'Inventory Fabric',
+          shade: r.shade,
+          status: 'issued',
+          cmfName: r.party || '',
+          party: r.party || ''
+        };
       }
     });
 
-    const mappedInventory = invIssuedRolls.map(roll => {
-      const rollReturns = returns.filter(r => r.originalBarcodeId === roll.barcode);
-      const totalReturned = rollReturns.reduce((sum, r) => sum + parseFloat(r.returnedWeight || r.weight || 0), 0);
-      const originalIssuedWeight = parseFloat(roll.issue_wt || roll.mrn_wt || 0);
+    // Build the final array
+    const allIssuedRolls = [];
+    const processedBarcodes = new Set();
 
-      let displayStatus = 'issued';
+    issuances.forEach(iss => {
+      if (iss.issuedItems) {
+        try {
+          const items = JSON.parse(iss.issuedItems);
+          if (Array.isArray(items)) {
+            items.forEach(item => {
+              const itemShade = item.shade || 'N/A';
+              const itemWeight = parseFloat(item.weight) || 0;
+              const barcodes = item.barcodeIds || [];
+              const rollsCount = parseInt(item.rolls) || barcodes.length || 1;
+
+              if (barcodes.length > 0) {
+                barcodes.forEach(bId => {
+                  if (processedBarcodes.has(bId)) return;
+                  processedBarcodes.add(bId);
+
+                  const dbInfo = barcodeMap[bId] || {};
+                  const originalIssuedWeight = dbInfo.weight !== undefined ? dbInfo.weight : (itemWeight / rollsCount);
+
+                  const rollReturns = returns.filter(r => r.originalBarcodeId === bId);
+                  const totalReturned = rollReturns.reduce((sum, r) => sum + parseFloat(r.returnedWeight || r.weight || 0), 0);
+
+                  let displayStatus = dbInfo.status || 'issued';
+                  if (totalReturned >= originalIssuedWeight) {
+                    displayStatus = 'returned';
+                  } else if (totalReturned > 0) {
+                    displayStatus = 'partially_issued';
+                  }
+
+                  allIssuedRolls.push({
+                    id: dbInfo.id || bId,
+                    barcodeId: bId,
+                    fabricName: dbInfo.fabricName || iss.fabric || 'Fabric',
+                    shade: itemShade,
+                    shadeEntry: item.shadeEntry || null,
+                    shadeId: item.id || null,
+                    cmfName: dbInfo.cmfName || iss.issuedBy || '',
+                    party: dbInfo.party || iss.issuedBy || '',
+                    originalIssuedWeight,
+                    totalReturnedWeight: totalReturned,
+                    fabricUsedForCutting: Math.max(0, originalIssuedWeight - totalReturned),
+                    status: displayStatus,
+                    availableToReturn: Math.max(0, originalIssuedWeight - totalReturned),
+                    weight: originalIssuedWeight,
+                    remainingWeight: Math.max(0, originalIssuedWeight - totalReturned)
+                  });
+                });
+              }
+            });
+          }
+        } catch (e) {
+          console.error('Error processing issuedItems:', e);
+        }
+      }
+    });
+
+    // Fallback: If no rolls were parsed from issuedItems (e.g. legacy/empty format), 
+    // fall back to mapping barcodes directly from barcodeIds list
+    barcodeIds.forEach(bId => {
+      if (processedBarcodes.has(bId)) return;
+      processedBarcodes.add(bId);
+
+      const dbInfo = barcodeMap[bId] || {};
+      const originalIssuedWeight = dbInfo.weight || 0;
+
+      const rollReturns = returns.filter(r => r.originalBarcodeId === bId);
+      const totalReturned = rollReturns.reduce((sum, r) => sum + parseFloat(r.returnedWeight || r.weight || 0), 0);
+
+      let displayStatus = dbInfo.status || 'issued';
       if (totalReturned >= originalIssuedWeight) {
         displayStatus = 'returned';
       } else if (totalReturned > 0) {
         displayStatus = 'partially_issued';
       }
 
-      return {
-        id: roll.id,
-        barcodeId: roll.barcode,
-        fabricName: roll.item_description || 'Inventory Fabric',
-        shade: findExactIssuedShade(roll.barcode) || roll.shade || 'N/A',
-        cmfName: roll.party || '',
-        party: roll.party || '',
-        originalIssuedWeight: originalIssuedWeight,
+      allIssuedRolls.push({
+        id: dbInfo.id || bId,
+        barcodeId: bId,
+        fabricName: dbInfo.fabricName || 'Fabric',
+        shade: dbInfo.shade || 'N/A',
+        shadeEntry: null,
+        shadeId: null,
+        cmfName: dbInfo.cmfName || '',
+        party: dbInfo.party || '',
+        originalIssuedWeight,
         totalReturnedWeight: totalReturned,
         fabricUsedForCutting: Math.max(0, originalIssuedWeight - totalReturned),
         status: displayStatus,
         availableToReturn: Math.max(0, originalIssuedWeight - totalReturned),
         weight: originalIssuedWeight,
         remainingWeight: Math.max(0, originalIssuedWeight - totalReturned)
-      };
+      });
     });
 
-    const allIssuedRolls = [...mappedDyeing, ...mappedMaterial];
-    const seenBarcodes = new Set(allIssuedRolls.map(r => r.barcodeId));
-
-    mappedInventory.forEach(roll => {
-      if (roll.barcodeId && !seenBarcodes.has(roll.barcodeId)) {
-        allIssuedRolls.push(roll);
-        seenBarcodes.add(roll.barcodeId);
-      }
-    });
-
+    console.log(`✅ Returning ${allIssuedRolls.length} mapped issued rolls for Lot ${lotNumber}`);
     res.json({
       success: true,
       data: allIssuedRolls

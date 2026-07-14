@@ -121,7 +121,8 @@ export const storeFabricIssuance = async (req, res) => {
         section: jobDetails['Section'] || jobDetails.section || '',
         season: jobDetails['Season'] || jobDetails.season || '',
         pattern: jobDetails['Pattern'] || jobDetails.pattern || '',
-        style: jobDetails['Style'] || jobDetails.style || ''
+        style: jobDetails['Style'] || jobDetails.style || '',
+        fetchedFromSheet: true
       }, { transaction });
     }
 
@@ -452,7 +453,8 @@ export const syncOfflineData = async (req, res) => {
           section: jobDetails['Section'] || jobDetails.section || '',
           season: jobDetails['Season'] || jobDetails.season || '',
           pattern: jobDetails['Pattern'] || jobDetails.pattern || '',
-          style: jobDetails['Style'] || jobDetails.style || ''
+          style: jobDetails['Style'] || jobDetails.style || '',
+          fetchedFromSheet: true
         }, { transaction });
       }
 

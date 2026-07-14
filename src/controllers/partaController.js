@@ -34,12 +34,8 @@ export const getPartaData = async (req, res) => {
 
 export const getPartaPendingReport = async (req, res) => {
   try {
-    const [issuanceLots, dyeingLots, partaRecords] = await Promise.all([
+    const [issuanceLots, partaRecords] = await Promise.all([
       FabricIssuance.findAll({
-        attributes: ['lotNumber'],
-        group: ['lotNumber']
-      }),
-      DyeingMaterial.findAll({
         attributes: ['lotNumber'],
         group: ['lotNumber']
       }),
@@ -48,9 +44,6 @@ export const getPartaPendingReport = async (req, res) => {
 
     const lotNumbersSet = new Set();
     issuanceLots.forEach(item => {
-      if (item.lotNumber) lotNumbersSet.add(String(item.lotNumber).trim());
-    });
-    dyeingLots.forEach(item => {
       if (item.lotNumber) lotNumbersSet.add(String(item.lotNumber).trim());
     });
 

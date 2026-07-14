@@ -1,4 +1,4 @@
-import { Material, Room, DyeingMaterial, JobOrder, Inventory } from '../models/index.js';
+import { Material, Room, DyeingMaterial, JobOrder, Inventory, Supplier, FabricIssuance } from '../models/index.js';
 import { addAuditLog, checkShelfCapacity } from './materialController.js';
 import { Op } from 'sequelize';
 import sequelize from '../config/db.js';
@@ -98,6 +98,38 @@ export const nextBarcodeId = async (req, res) => {
       }
       nextId = lastId + 1;
       barcodeId = String(nextId);
+    } else if (type === 'po' || type === 'material-against-po') {
+      const lastPoMaterial = await Material.findOne({
+        where: {
+          code: {
+            [Op.like]: '8%'
+          }
+        },
+        order: [['code', 'DESC']]
+      });
+      lastId = 8000000;
+      if (lastPoMaterial) {
+        const match = lastPoMaterial.code.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
+    } else if (type === 're-add') {
+      const lastReAdd = await Material.findOne({
+        where: {
+          code: {
+            [Op.like]: '9%'
+          }
+        },
+        order: [['code', 'DESC']]
+      });
+      lastId = 900000;
+      if (lastReAdd) {
+        const match = lastReAdd.code.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
     } else {
       // Legacy Fallback matching original sequence logic
       const lastMaterial = await Material.findOne({
@@ -150,8 +182,17 @@ export const storeFabricData = async (req, res) => {
       weight,
       rollNumber,
       batchTotal,
-      unit
+      unit,
+      poNumber
     } = req.body;
+
+    // Ensure supplier exists in the database
+    if (cmfName) {
+      await Supplier.findOrCreate({
+        where: { name: cmfName.trim() },
+        defaults: { status: 'Active' }
+      });
+    }
 
     // Determine category based on room if possible, else default to 'Summer Fabric'
     let category = 'Summer Fabric';
@@ -163,7 +204,7 @@ export const storeFabricData = async (req, res) => {
       category: category,
       subCategory: group || '',
       color: shade || '',
-      supplier: null, // default
+      supplier: cmfName || null,
       weight: parseFloat(weight) || 0.00,
       rolls: 1, // single roll per barcode
       unit: unit || 'KGS',
@@ -174,7 +215,8 @@ export const storeFabricData = async (req, res) => {
       receivedPerson: receivedPerson || '',
       authorizedPerson: authorizedPerson || '',
       receivedDate: date || new Date().toISOString().slice(0, 10),
-      lotNo: lotNumber || ''
+      lotNo: lotNumber || '',
+      poNumber: poNumber || null
     });
 
     await addAuditLog(
@@ -664,6 +706,28 @@ export const fetchJobOrders = async (req, res) => {
     const parsedRows = [];
     const dbUpsertData = [];
 
+    // Fetch all FabricIssuance records to map lotNumber -> issuedAt
+    let issuanceDateMap = {};
+    try {
+      const issuances = await FabricIssuance.findAll({
+        attributes: ['lotNumber', 'issuedAt'],
+        raw: true
+      });
+      issuances.forEach(iss => {
+        if (iss.lotNumber && iss.issuedAt) {
+          let dateStr = String(iss.issuedAt).trim();
+          if (dateStr.includes('T')) {
+            dateStr = dateStr.split('T')[0];
+          }
+          if (!issuanceDateMap[iss.lotNumber] || issuanceDateMap[iss.lotNumber] > dateStr) {
+            issuanceDateMap[iss.lotNumber] = dateStr;
+          }
+        }
+      });
+    } catch (dbErr) {
+      console.error('[Sheets API] Error querying FabricIssuance for job orders:', dbErr);
+    }
+
     for (let i = 1; i < rows.length; i++) {
       const cells = rows[i];
       if (cells.length === 0 || (cells.length === 1 && cells[0] === '')) continue;
@@ -671,10 +735,13 @@ export const fetchJobOrders = async (req, res) => {
       headers.forEach((header, index) => {
         obj[header] = cells[index] || '';
       });
+
+      const lotNumber = String(obj['Lot Number'] || '').trim();
+      obj['fabricIssuedDate'] = issuanceDateMap[lotNumber] || '';
+
       parsedRows.push(obj);
 
       // Collect data for background bulk upsert
-      const lotNumber = obj['Lot Number'] || '';
       if (lotNumber) {
         dbUpsertData.push({
           jobOrderNo: obj['Job Order No'] || '',
@@ -690,13 +757,14 @@ export const fetchJobOrders = async (req, res) => {
           section: obj['Section'] || '',
           season: obj['Season'] || '',
           pattern: obj['Pattern'] || '',
-          style: obj['Style'] || ''
+          style: obj['Style'] || '',
+          priority: obj['Priority'] || obj['priority'] || ''
         });
       }
     }
 
     console.log(`[Sheets API] Fetched and parsed ${parsedRows.length} Job Orders. Responding to client instantly.`);
-    
+
     // 1. Respond to user instantly
     res.json(parsedRows);
 
@@ -716,9 +784,9 @@ export const fetchJobOrders = async (req, res) => {
       console.log(`[Sheets API] Syncing ${uniqueDbUpsertData.length} unique Job Orders to MySQL in background...`);
       JobOrder.bulkCreate(uniqueDbUpsertData, {
         updateOnDuplicate: [
-          'jobOrderNo', 'fabric', 'brand', 'quantity', 'unit', 
-          'shade', 'date', 'size', 'garmentType', 'section', 
-          'season', 'pattern', 'style'
+          'jobOrderNo', 'fabric', 'brand', 'quantity', 'unit',
+          'shade', 'date', 'size', 'garmentType', 'section',
+          'season', 'pattern', 'style', 'priority'
         ]
       }).then(() => {
         console.log('[Sheets API] Background database sync completed successfully!');
@@ -797,7 +865,7 @@ export const getDailyInventoryReport = async (req, res) => {
     if (date) {
       targetDate = new Date(date);
     }
-    
+
     const startOfTarget = new Date(targetDate);
     startOfTarget.setHours(0, 0, 0, 0);
     const endOfTarget = new Date(targetDate);
@@ -927,11 +995,14 @@ export const getRawInventory = async (req, res) => {
 
     // Stock Status filter
     if (filterStockStatus === 'In Stock') {
-      whereClause.bal_wt = { [Op.gt]: 0 };
-    } else if (filterStockStatus === 'Out of Stock') {
       whereClause[Op.or] = [
-        { bal_wt: { [Op.lte]: 0 } },
-        { bal_wt: null }
+        { bal_pkgs: { [Op.notIn]: ['', '0', '0.00'] } },
+        { bal_wt: { [Op.notIn]: ['', '0', '0.00'] } }
+      ];
+    } else if (filterStockStatus === 'Out of Stock') {
+      whereClause[Op.and] = [
+        { bal_pkgs: { [Op.in]: ['', '0', '0.00', null] } },
+        { bal_wt: { [Op.in]: ['', '0', '0.00', null] } }
       ];
     }
 
@@ -1022,8 +1093,9 @@ export const searchJobOrderByLot = async (req, res) => {
       where: { lotNumber: String(lotNumber).trim() }
     });
 
-    if (dbJob) {
-      console.log(`[Job Order Search] Found Lot ${lotNumber} in MySQL database`);
+    // Subsequent search: If found in DB and marked as fetchedFromSheet, use it
+    if (dbJob && dbJob.fetchedFromSheet) {
+      console.log(`[Job Order Search] Found Lot ${lotNumber} in MySQL database (fetchedFromSheet is true)`);
       // Map back to frontend expected header names
       const mappedData = {
         'Job Order No': dbJob.jobOrderNo,
@@ -1048,7 +1120,104 @@ export const searchJobOrderByLot = async (req, res) => {
       });
     }
 
-    // Check Inventory database table
+    // First time or not yet fetched: Fetch from cached/fresh Google Sheets
+    console.log(`[Job Order Search] Lot ${lotNumber} not yet fetched from sheet. Loading from Google Sheets...`);
+
+    const csvText = await getJobOrdersCsvText();
+    const rows = parseCsvTextIntoRows(csvText);
+
+    let foundRow = null;
+
+    if (rows.length > 0) {
+      const headers = rows[0];
+      const targetLot = String(lotNumber).trim().toLowerCase();
+
+      // Find the index of 'Lot Number' column
+      const lotIndex = headers.findIndex(h => h.trim().toLowerCase() === 'lot number');
+      if (lotIndex !== -1) {
+        for (let i = 1; i < rows.length; i++) {
+          const cells = rows[i];
+          if (cells.length > lotIndex) {
+            const cellLot = String(cells[lotIndex]).trim().toLowerCase();
+            if (cellLot === targetLot) {
+              let obj = {};
+              headers.forEach((header, index) => {
+                obj[header] = cells[index] || '';
+              });
+              foundRow = obj;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (foundRow) {
+      console.log(`[Job Order Search] Found Lot ${lotNumber} in Google Sheets. Syncing to database with fetchedFromSheet=true...`);
+      try {
+        const lotNumberClean = String(foundRow['Lot Number'] || '').trim();
+        if (lotNumberClean) {
+          JobOrder.upsert({
+            jobOrderNo: foundRow['Job Order No'] || '',
+            lotNumber: lotNumberClean,
+            fabric: foundRow['Fabric'] || '',
+            brand: foundRow['Brand'] || '',
+            quantity: parseInt(foundRow['Quantity']) || 0,
+            unit: foundRow['Unit'] || '',
+            shade: foundRow['Shade'] || '',
+            date: foundRow['Date'] || '',
+            size: foundRow['Size'] || '',
+            garmentType: foundRow['Garment Type'] || '',
+            section: foundRow['Section'] || '',
+            season: foundRow['Season'] || '',
+            pattern: foundRow['Pattern'] || '',
+            style: foundRow['Style'] || '',
+            priority: foundRow['Priority'] || foundRow['priority'] || '',
+            fetchedFromSheet: true
+          }).then(() => {
+            console.log(`[Job Order Search] Automatically synced Lot ${lotNumberClean} (fetchedFromSheet=true) to SQL database`);
+          }).catch(upsertErr => {
+            console.error(`[Job Order Search] Failed to auto-sync Lot ${lotNumberClean} to SQL:`, upsertErr.message);
+          });
+        }
+      } catch (err) {
+        console.error(`[Job Order Search] Error preparing auto-sync:`, err.message);
+      }
+
+      return res.json({
+        success: true,
+        data: foundRow,
+        source: 'sheets'
+      });
+    }
+
+    // Fallback 1: If it existed in JobOrder database table (even if not marked fetchedFromSheet), return that
+    if (dbJob) {
+      console.log(`[Job Order Search] Lot ${lotNumber} not found on Google Sheet. Falling back to existing database record.`);
+      const mappedData = {
+        'Job Order No': dbJob.jobOrderNo,
+        'Lot Number': dbJob.lotNumber,
+        'Fabric': dbJob.fabric,
+        'Brand': dbJob.brand,
+        'Quantity': dbJob.quantity,
+        'Unit': dbJob.unit,
+        'Shade': dbJob.shade,
+        'Date': dbJob.date,
+        'Size': dbJob.size,
+        'Garment Type': dbJob.garmentType,
+        'Section': dbJob.section,
+        'Season': dbJob.season,
+        'Pattern': dbJob.pattern,
+        'Style': dbJob.style
+      };
+      return res.json({
+        success: true,
+        data: mappedData,
+        source: 'database_fallback'
+      });
+    }
+
+    // Fallback 2: Check Inventory database table
     console.log(`[Job Order Search] Checking MySQL Inventory table for Lot: ${lotNumber}`);
     const inventoryRecords = await Inventory.findAll({
       where: { lot_no: String(lotNumber).trim() }
@@ -1093,50 +1262,7 @@ export const searchJobOrderByLot = async (req, res) => {
       });
     }
 
-    console.log(`[Job Order Search] Lot ${lotNumber} NOT found in MySQL database. Loading from cached/fresh Google Sheets...`);
-
-    const csvText = await getJobOrdersCsvText();
-    const rows = parseCsvTextIntoRows(csvText);
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'No job orders found on sheet' });
-    }
-
-    const headers = rows[0];
-    const targetLot = String(lotNumber).trim().toLowerCase();
-    let foundRow = null;
-
-    // Find the index of 'Lot Number' column
-    const lotIndex = headers.findIndex(h => h.trim().toLowerCase() === 'lot number');
-    if (lotIndex === -1) {
-      throw new Error('Lot Number column not found in Google Sheets headers');
-    }
-
-    for (let i = 1; i < rows.length; i++) {
-      const cells = rows[i];
-      if (cells.length > lotIndex) {
-        const cellLot = String(cells[lotIndex]).trim().toLowerCase();
-        if (cellLot === targetLot) {
-          let obj = {};
-          headers.forEach((header, index) => {
-            obj[header] = cells[index] || '';
-          });
-          foundRow = obj;
-          break;
-        }
-      }
-    }
-
-    if (foundRow) {
-      console.log(`[Job Order Search] Found Lot ${lotNumber} in Google Sheets`);
-      return res.json({
-        success: true,
-        data: foundRow,
-        source: 'sheets'
-      });
-    }
-
-    console.log(`[Job Order Search] Lot ${lotNumber} not found in Google Sheets`);
+    console.log(`[Job Order Search] Lot ${lotNumber} not found in Google Sheets or MySQL`);
     return res.status(404).json({ success: false, message: 'Lot Number not found' });
   } catch (error) {
     console.error('[Job Order Search] Error searching job order:', error);
@@ -1284,8 +1410,8 @@ function formatDateYMDToDDMMMYYYY(dateStr) {
   if (parts.length === 3) {
     const [year, month, day] = parts.map(p => parseInt(p, 10));
     if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
-      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
-                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       const monthName = monthNames[month - 1] || "";
       return `${day} ${monthName} ${year}`;
     }
@@ -1297,8 +1423,8 @@ function formatSavedAtToYMD(savedAt) {
   if (!savedAt) return "";
   const d = new Date(savedAt);
   if (isNaN(d.getTime())) return "";
-  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
-                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const day = d.getDate();
   const monthName = monthNames[d.getMonth()];
   const year = d.getFullYear();
@@ -1349,21 +1475,21 @@ function convertValuesToObjects(values) {
     ].forEach((canonHeader) => {
       const idx = canonToIndex[canonHeader];
       let value = idx != null ? (row[idx] ?? "") : "";
-      
+
       if (canonHeader === "Date" && value) {
         value = formatDateYMDToDDMMMYYYY(value);
       }
-      
+
       obj[canonHeader] = value;
     });
-    
+
     if (canonToIndex["Date"] != null) {
       const originalDate = row[canonToIndex["Date"]] ?? "";
       obj["PO Date"] = originalDate;
     } else {
       obj["PO Date"] = "";
     }
-    
+
     obj["Days after PO issue"] = "";
     obj["Total Qty"] = 0;
     obj["Pending Shade"] = "";
@@ -1420,12 +1546,12 @@ function findHeaderRowIndex(windowValues, expectedSizesNorm) {
     const hasColor = rowText.some(c => c === "color" || c === "shade" || c === "shades");
     const hasCuttingTable = rowText.some(c => c === "cutting table" || c === "cuttingtable");
     const hasSizes = expectedSizesNorm.some(sz => rowText.includes(sz));
-    
+
     if (hasColor && (hasCuttingTable || hasSizes)) {
       return i;
     }
   }
-  
+
   let bestMatchIdx = 0;
   let bestMatchCount = 0;
   for (let i = 0; i < Math.min(windowValues.length, 20); i++) {
@@ -1486,8 +1612,8 @@ function calculateTotalPCS(cuttingData, startRow, numRows, sizes = []) {
   });
 
   const nonSizeColumns = new Set([
-    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total", 
-    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric", 
+    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total",
+    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric",
     "garment", "partyname", "brand", "section", "season"
   ]);
 
@@ -1552,8 +1678,8 @@ function computePendingShades(windowValues, sizes = [], shades = []) {
   const shadeColIndex = hIdx["color"] ?? hIdx["shade"] ?? hIdx["shades"] ?? 0;
 
   const nonSizeColumns = new Set([
-    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total", 
-    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric", 
+    "color", "shade", "shades", "cuttingtable", "cutting", "table", "total",
+    "totalpcs", "totals", "grandtotal", "sum", "lot", "style", "fabric",
     "garment", "partyname", "brand", "section", "season"
   ]);
 
@@ -1633,40 +1759,40 @@ function extractCuttingTables(windowValues, sizes = []) {
   const headerRowIdx = findHeaderRowIndex(windowValues, normalizedSizes);
   if (headerRowIdx >= windowValues.length) return [];
   const header = windowValues[headerRowIdx] || [];
-  
+
   const hIdx = {};
   header.forEach((h, i) => {
     const k = normalizeKey(h);
     if (k && !(k in hIdx)) hIdx[k] = i;
   });
-  
+
   let tableColIndex = -1;
   for (let i = 0; i < header.length; i++) {
     const headerText = String(header[i] || "").trim();
     const normalizedHeader = normalizeKey(headerText);
-    if (normalizedHeader === "cuttingtable" || 
-        normalizedHeader === "cutting table" ||
-        headerText === "Cutting Table") {
+    if (normalizedHeader === "cuttingtable" ||
+      normalizedHeader === "cutting table" ||
+      headerText === "Cutting Table") {
       tableColIndex = i;
       break;
     }
   }
-  
+
   if (tableColIndex === -1) {
     return [];
   }
-  
+
   const sizeColumns = [];
   const sizePatterns = ['m', 'l', 'xl', 'xxl', '2xl', '3xl', '4xl', 's', 'xs', 'xxs'];
   for (let i = 0; i < header.length; i++) {
     const headerText = String(header[i] || "").trim().toLowerCase();
-    if (sizePatterns.includes(headerText) || 
-        (headerText.match(/^[0-9]+$/) && parseInt(headerText) > 0) ||
-        sizePatterns.some(pattern => headerText === pattern)) {
+    if (sizePatterns.includes(headerText) ||
+      (headerText.match(/^[0-9]+$/) && parseInt(headerText) > 0) ||
+      sizePatterns.some(pattern => headerText === pattern)) {
       sizeColumns.push(i);
     }
   }
-  
+
   for (let i = 0; i < header.length; i++) {
     const headerText = String(header[i] || "").trim();
     const num = parseFloat(headerText);
@@ -1674,21 +1800,21 @@ function extractCuttingTables(windowValues, sizes = []) {
       sizeColumns.push(i);
     }
   }
-  
+
   if (sizeColumns.length === 0) {
     return [];
   }
-  
+
   const uniqueTables = new Set();
   for (let r = headerRowIdx + 1; r < windowValues.length; r++) {
     const row = windowValues[r] || [];
     if (!row || row.length === 0) continue;
-    
+
     const shadeValue = String(row[0] || "").trim().toLowerCase();
     if (shadeValue === "total" || shadeValue === "totals" || shadeValue === "grand total") {
       continue;
     }
-    
+
     let hasPositiveData = false;
     for (const colIdx of sizeColumns) {
       if (colIdx < row.length) {
@@ -1702,7 +1828,7 @@ function extractCuttingTables(windowValues, sizes = []) {
         }
       }
     }
-    
+
     if (hasPositiveData && tableColIndex < row.length) {
       const tableValue = String(row[tableColIndex] || "").trim();
       if (tableValue && tableValue !== "" && tableValue !== "0") {
@@ -1711,7 +1837,7 @@ function extractCuttingTables(windowValues, sizes = []) {
       }
     }
   }
-  
+
   return Array.from(uniqueTables).sort((a, b) => {
     const numA = parseFloat(a);
     const numB = parseFloat(b);
@@ -1887,6 +2013,210 @@ export const getPendingCuttingLots = async (req, res) => {
     });
   } catch (error) {
     console.error('[Sheets API] Error getting pending cutting lots:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/** ====== PO Details and PO Audit API endpoints ====== */
+
+export const fetchPoDetails = async (req, res) => {
+  try {
+    const { poNumber } = req.params;
+    if (!poNumber) {
+      return res.status(400).json({ success: false, message: 'PO number is required' });
+    }
+
+    console.log(`[PO API] Fetching details for PO: ${poNumber}`);
+    const data = await fetchSheet({
+      sheetId: '1hy43mDxXtGVq4jeMV_NxX25Q7tnX55NnplN7eqpT74k',
+      range: 'PO_items',
+      apiKey: 'AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk'
+    });
+
+    if (!data || !data.values) {
+      return res.status(404).json({ success: false, message: 'No data found in PO spreadsheet' });
+    }
+
+    const headers = data.values[0];
+    const poColIdx = headers.findIndex(h => h.toLowerCase().includes('po'));
+    const lineColIdx = headers.findIndex(h => h.toLowerCase().includes('line'));
+    const deptColIdx = headers.findIndex(h => h.toLowerCase().includes('dept') || h.toLowerCase().includes('department'));
+    const descColIdx = headers.findIndex(h => h.toLowerCase().includes('desc'));
+    const uomColIdx = headers.findIndex(h => h.toLowerCase().includes('uom'));
+    const qtyColIdx = headers.findIndex(h => h.toLowerCase().includes('qty'));
+
+    if (poColIdx === -1 || descColIdx === -1) {
+      return res.status(500).json({ success: false, message: 'Invalid PO sheet headers structure' });
+    }
+
+    // Filter matching rows
+    const matchingLines = [];
+    const searchPo = poNumber.trim().toLowerCase();
+
+    for (let i = 1; i < data.values.length; i++) {
+      const row = data.values[i];
+      const rowPo = row[poColIdx] ? row[poColIdx].trim() : '';
+      if (rowPo.toLowerCase() === searchPo) {
+        const dept = deptColIdx !== -1 && row[deptColIdx] ? row[deptColIdx].trim() : '';
+        if (dept.toLowerCase() !== 'fabric') continue;
+
+        matchingLines.push({
+          poNumber: rowPo,
+          lineNo: lineColIdx !== -1 && row[lineColIdx] ? row[lineColIdx].trim() : String(matchingLines.length + 1),
+          department: dept,
+          description: descColIdx !== -1 && row[descColIdx] ? row[descColIdx].trim() : '',
+          uom: uomColIdx !== -1 && row[uomColIdx] ? row[uomColIdx].trim() : 'MTR',
+          qty: qtyColIdx !== -1 && row[qtyColIdx] ? parseFloat(row[qtyColIdx]) || 0 : 0
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      poNumber: poNumber,
+      items: matchingLines
+    });
+
+  } catch (error) {
+    console.error('[PO API] Error fetching PO details:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const fetchPoAuditReport = async (req, res) => {
+  try {
+    console.log('[PO Audit API] Fetching PO items from Google Sheets...');
+    const data = await fetchSheet({
+      sheetId: '1hy43mDxXtGVq4jeMV_NxX25Q7tnX55NnplN7eqpT74k',
+      range: 'PO_items',
+      apiKey: 'AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk'
+    });
+
+    if (!data || !data.values) {
+      return res.status(404).json({ success: false, message: 'No data found in PO spreadsheet' });
+    }
+
+    const headers = data.values[0];
+    const poColIdx = headers.findIndex(h => h.toLowerCase().includes('po'));
+    const lineColIdx = headers.findIndex(h => h.toLowerCase().includes('line'));
+    const deptColIdx = headers.findIndex(h => h.toLowerCase().includes('dept') || h.toLowerCase().includes('department'));
+    const descColIdx = headers.findIndex(h => h.toLowerCase().includes('desc'));
+    const uomColIdx = headers.findIndex(h => h.toLowerCase().includes('uom'));
+    const qtyColIdx = headers.findIndex(h => h.toLowerCase().includes('qty'));
+
+    if (poColIdx === -1 || descColIdx === -1) {
+      return res.status(500).json({ success: false, message: 'Invalid PO sheet headers structure' });
+    }
+
+    // Extract all PO items from sheet
+    const poItemsMap = {};
+    for (let i = 1; i < data.values.length; i++) {
+      const row = data.values[i];
+      const rowPo = row[poColIdx] ? row[poColIdx].trim() : '';
+      if (!rowPo) continue;
+
+      const desc = descColIdx !== -1 && row[descColIdx] ? row[descColIdx].trim() : '';
+      const uom = uomColIdx !== -1 && row[uomColIdx] ? row[uomColIdx].trim() : 'MTR';
+      const qty = qtyColIdx !== -1 && row[qtyColIdx] ? parseFloat(row[qtyColIdx]) || 0 : 0;
+      const dept = deptColIdx !== -1 && row[deptColIdx] ? row[deptColIdx].trim() : '';
+      if (dept.toLowerCase() !== 'fabric') continue;
+
+      const key = `${rowPo.toLowerCase()}|||${desc.toLowerCase()}`;
+      if (!poItemsMap[key]) {
+        poItemsMap[key] = {
+          poNumber: rowPo,
+          description: desc,
+          uom: uom,
+          orderedQty: 0,
+          department: dept
+        };
+      }
+      poItemsMap[key].orderedQty += qty;
+    }
+
+    // Fetch all materials received against POs from DB
+    const receivedMaterials = await Material.findAll({
+      attributes: [
+        'poNumber',
+        'name',
+        [sequelize.fn('COUNT', sequelize.col('id')), 'rollsCount'],
+        [sequelize.fn('SUM', sequelize.col('weight')), 'totalWeight']
+      ],
+      where: {
+        poNumber: {
+          [Op.ne]: null
+        }
+      },
+      group: ['poNumber', 'name']
+    });
+
+    const receivedMap = {};
+    receivedMaterials.forEach(m => {
+      const poNum = m.getDataValue('poNumber') || '';
+      const name = m.getDataValue('name') || '';
+      const key = `${poNum.toLowerCase()}|||${name.toLowerCase()}`;
+      receivedMap[key] = {
+        rollsCount: parseInt(m.getDataValue('rollsCount')) || 0,
+        totalWeight: parseFloat(m.getDataValue('totalWeight')) || 0.00
+      };
+    });
+
+    // Merge sheet PO items and DB received stats
+    const auditReport = [];
+    Object.keys(poItemsMap).forEach(key => {
+      const item = poItemsMap[key];
+      const dbReceived = receivedMap[key] || { rollsCount: 0, totalWeight: 0 };
+
+      // Determine received qty depending on UOM
+      let receivedQty = 0;
+      if (item.uom.toUpperCase() === 'ROLL') {
+        receivedQty = dbReceived.rollsCount;
+      } else {
+        receivedQty = dbReceived.totalWeight;
+      }
+
+      const diff = item.orderedQty - receivedQty;
+      let status = 'Match';
+      if (diff > 0.01) {
+        status = 'Shortage';
+      } else if (diff < -0.01) {
+        status = 'Excess';
+      }
+
+      auditReport.push({
+        poNumber: item.poNumber,
+        department: item.department,
+        description: item.description,
+        uom: item.uom,
+        orderedQty: item.orderedQty,
+        receivedRolls: dbReceived.rollsCount,
+        receivedQty: parseFloat(receivedQty.toFixed(2)),
+        difference: parseFloat(diff.toFixed(2)),
+        status: status
+      });
+    });
+
+    return res.json({
+      success: true,
+      report: auditReport
+    });
+
+  } catch (error) {
+    console.error('[PO Audit API] Error generating PO Audit report:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const fetchIssuedLots = async (req, res) => {
+  try {
+    const issuances = await FabricIssuance.findAll({
+      attributes: ['lotNumber'],
+      group: ['lotNumber']
+    });
+    const lotNumbers = issuances.map(iss => String(iss.lotNumber || '').trim()).filter(Boolean);
+    res.json({ success: true, lotNumbers });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching issued lot numbers:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
