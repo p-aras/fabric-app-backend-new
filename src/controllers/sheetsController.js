@@ -861,17 +861,13 @@ export const fetchInventoryRolls = async (req, res) => {
 export const getDailyInventoryReport = async (req, res) => {
   try {
     const { date } = req.query;
-    let targetDate = new Date();
-    if (date) {
-      targetDate = new Date(date);
+    let targetDateStr = date;
+    if (!targetDateStr) {
+      targetDateStr = new Date().toISOString().slice(0, 10);
     }
 
-    const startOfTarget = new Date(targetDate);
-    startOfTarget.setHours(0, 0, 0, 0);
-    const endOfTarget = new Date(targetDate);
-    endOfTarget.setHours(23, 59, 59, 999);
-
-    const targetDateStr = startOfTarget.toISOString().slice(0, 10);
+    const startOfTarget = new Date(`${targetDateStr}T00:00:00`);
+    const endOfTarget = new Date(`${targetDateStr}T23:59:59.999`);
 
     // Query materials added on target day
     const materials = await Material.findAll({
@@ -1528,7 +1524,12 @@ function parseIndexRow(header, row) {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  return { lot, startRow, numRows, headerCols, fabric, garmentType, style, sizes, shades, savedAt };
+  const partyName = get("partyname") || get("party name");
+  const brand = get("brand");
+  const cuttingQty = parseFloat(get("cuttingqty") || get("cutting qty")) || 0;
+  const supervisor = get("supervisor");
+
+  return { lot, startRow, numRows, headerCols, fabric, garmentType, style, sizes, shades, savedAt, partyName, brand, cuttingQty, supervisor };
 }
 
 function sliceCuttingMatrix(bigValues, startRow, numRows) {
@@ -2221,4 +2222,216 @@ export const fetchIssuedLots = async (req, res) => {
   }
 };
 
+export const getDyeingShortageReportFromSheet = async (req, res) => {
+  try {
+    // 1. Fetch fresh or cached sheet CSV text
+    const csvText = await getSheetDataCsvText();
+    const rows = parseCsvTextIntoRows(csvText);
 
+    // 2. Group sheet data by lotNumber and shade
+    const sheetGroups = {};
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length < 6) continue;
+
+      const lot = String(row[2] || '').trim();
+      const party = String(row[0] || '').trim();
+      const itemName = String(row[1] || '').trim();
+
+      // Skip headers or title rows
+      if (
+        !lot ||
+        lot.toLowerCase() === 'lot no' ||
+        party.toLowerCase() === 'party' ||
+        party.includes('Mohit Hosiery') ||
+        party.includes('JW Status')
+      ) {
+        continue;
+      }
+
+      const shade = String(row[5] || '').trim();
+      const bill = String(row[3] || '').trim();
+
+      // Parse weight from Op Qty (8) or Balance (13) or Issue Qty (9)
+      const rawWeight = row[8] || row[13] || row[9] || '0';
+      const weight = parseFloat(String(rawWeight).replace(/,/g, '')) || 0.00;
+
+      // Parse rolls from Op Rolls (14) or Balance Rolls (18) or Issue Rolls (15)
+      const rawRolls = row[14] || row[18] || row[15] || '0';
+      const rolls = parseInt(rawRolls) || 0;
+
+      // Skip entries with no weight/rolls
+      if (weight === 0 && rolls === 0) continue;
+
+      const key = `${lot.toLowerCase()}|||${shade.toLowerCase()}`;
+      if (!sheetGroups[key]) {
+        sheetGroups[key] = {
+          lotNumber: lot,
+          shade: shade,
+          billNumber: bill,
+          brand: party,
+          fabric: itemName,
+          sentRolls: 0,
+          sentWeight: 0
+        };
+      } else {
+        if (!sheetGroups[key].billNumber && bill) {
+          sheetGroups[key].billNumber = bill;
+        }
+      }
+      sheetGroups[key].sentRolls += rolls;
+      sheetGroups[key].sentWeight += weight;
+    }
+
+    // 3. Fetch received dyeing materials from database (DyeingMaterial)
+    const dyeingMaterials = await DyeingMaterial.findAll();
+    const receivedGroups = {};
+    for (const dm of dyeingMaterials) {
+      const lot = String(dm.lotNumber || '').trim().toLowerCase();
+      if (!lot) continue;
+
+      // Check if shade contains a '/' (issued / received) and use the issued part to match sheet's Issue Shade
+      let shade = String(dm.shade || '').trim().toLowerCase();
+      if (shade.includes(' / ')) {
+        shade = shade.split(' / ')[0].trim();
+      }
+
+      const key = `${lot}|||${shade}`;
+      if (!receivedGroups[key]) {
+        receivedGroups[key] = {
+          receivedRolls: 0,
+          receivedWeight: 0
+        };
+      }
+      receivedGroups[key].receivedRolls += 1;
+      receivedGroups[key].receivedWeight += parseFloat(dm.weight) || 0.00;
+    }
+
+    // 4. Compare sheet (sent) vs DB (received) to compute shortage report
+    const reportData = [];
+    for (const key of Object.keys(sheetGroups)) {
+      const sGroup = sheetGroups[key];
+      const rGroup = receivedGroups[key] || { receivedRolls: 0, receivedWeight: 0 };
+
+      const sentRolls = sGroup.sentRolls;
+      const sentWeight = sGroup.sentWeight;
+      const receivedRolls = rGroup.receivedRolls;
+      const receivedWeight = rGroup.receivedWeight;
+
+      const rollDiff = sentRolls - receivedRolls;
+      const weightDiff = sentWeight - receivedWeight;
+      const shortagePct = sentWeight > 0 ? parseFloat(((weightDiff / sentWeight) * 100).toFixed(2)) : 0;
+
+      // Report items that have some discrepancy
+      if (weightDiff > 0.01 || rollDiff > 0) {
+        reportData.push({
+          billNumber: sGroup.billNumber || '—',
+          lotNumber: sGroup.lotNumber,
+          batchNumber: '—',
+          brand: sGroup.brand || '—',
+          fabric: sGroup.fabric || '—',
+          sentRolls: sentRolls,
+          receivedRolls: receivedRolls,
+          rollDiff: Math.max(0, rollDiff),
+          sentWeight: parseFloat(sentWeight.toFixed(2)),
+          receivedWeight: parseFloat(receivedWeight.toFixed(2)),
+          weightDiff: parseFloat(Math.max(0, weightDiff).toFixed(2)),
+          shortagePct: shortagePct > 0 ? shortagePct : 0,
+          sentShade: sGroup.shade || '—',
+          status: shortagePct > 10 ? 'Reject' : 'Approved'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: reportData
+    });
+  } catch (error) {
+    console.error('[Sheets API Shortage Report] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+let dailyCuttingReportCache = null;
+let dailyCuttingReportCacheTime = 0;
+const DAILY_CUTTING_CACHE_DURATION = 10 * 60 * 1000; // 10 minutes cache
+
+export const getDailyCuttingReportData = async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+    const now = Date.now();
+    
+    if (!forceRefresh && dailyCuttingReportCache && (now - dailyCuttingReportCacheTime < DAILY_CUTTING_CACHE_DURATION)) {
+      console.log('⚡ [Daily Cutting Report] Serving from memory cache');
+      return res.json({ success: true, data: dailyCuttingReportCache });
+    }
+
+    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+    const INDEX_SHEET_NAME = "Index";
+    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:Z`;
+    const CUTTING_SHEET_NAME = "Cutting";
+    const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
+
+    // 1. Fetch Index sheet from Budget Report
+    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+    const idxValues = idxRes.values || [];
+    const idxHeader = idxValues[0] || [];
+    
+    // 2. Fetch large Cutting matrix
+    const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
+    const bigCuttingValues = cuttingRes.values || [];
+
+    const completedLots = [];
+
+    const formatSavedAtToYYYYMMDD = (savedAt) => {
+      if (!savedAt) return "";
+      const d = new Date(savedAt);
+      if (isNaN(d.getTime())) return "";
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    };
+
+    for (let i = 1; i < idxValues.length; i++) {
+      const entry = parseIndexRow(idxHeader, idxValues[i]);
+      if (!entry) continue;
+
+      // Only fetch lots where cutting is completed or style/savedAt exists
+      const cuttingDate = formatSavedAtToYYYYMMDD(entry.savedAt);
+      if (!cuttingDate) continue;
+
+      let totalQty = entry.cuttingQty;
+      if (!totalQty || totalQty === 0) {
+        totalQty = calculateTotalPCS(bigCuttingValues, entry.startRow, entry.numRows, entry.sizes);
+      }
+
+      const window = sliceCuttingMatrix(bigCuttingValues, entry.startRow, entry.numRows);
+      const tablesList = extractCuttingTables(window, entry.sizes);
+      const cuttingTableDisplay = tablesList && tablesList.length > 0 ? tablesList.join(", ") : "—";
+
+      completedLots.push({
+        "Lot No": entry.lot,
+        "Fabric": entry.fabric || '—',
+        "Style": entry.style || '—',
+        "Brand": entry.brand || '—',
+        "Garment Type": entry.garmentType || '—',
+        "Party Name": entry.partyName || '—',
+        "Cutting Table": cuttingTableDisplay,
+        "Cutting Date": cuttingDate,
+        "Supervisor": entry.supervisor || '—',
+        "Total Qty": totalQty
+      });
+    }
+
+    dailyCuttingReportCache = completedLots;
+    dailyCuttingReportCacheTime = now;
+
+    res.json({ success: true, data: completedLots });
+  } catch (error) {
+    console.error('[Sheets API Daily Cutting Report] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

@@ -336,6 +336,10 @@ export const Table = sequelize.define('Table', {
     type: DataTypes.INTEGER,
     allowNull: true,
     references: { model: 'Users', key: 'id' }
+  },
+  hall: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 });
 
@@ -382,6 +386,28 @@ User.hasMany(Table, { foreignKey: 'supervisorId' });
 Table.belongsTo(User, { foreignKey: 'supervisorId', as: 'Supervisor' });
 Table.belongsTo(User, { foreignKey: 'cutterMasterId', as: 'CutterMaster' });
 
+// --- ATTENDANCE MODEL ---
+export const Attendance = sequelize.define('Attendance', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  department: { type: DataTypes.STRING, allowNull: false },
+  hodName: { type: DataTypes.STRING, allowNull: true },
+  hodStatus: { type: DataTypes.STRING, allowNull: true }, // e.g. Present, Absent, Half Day (Legacy single value)
+  hods: { type: DataTypes.TEXT }, // JSON array of HODs: [{ name, status }]
+  supervisors: { type: DataTypes.TEXT }, // JSON array of supervisors: [{ name, status }]
+  helpers: { type: DataTypes.TEXT }, // JSON array of helpers: [{ name, status }]
+  masters: { type: DataTypes.TEXT }, // JSON array of masters: [{ name, status }]
+  mastersCount: { type: DataTypes.INTEGER, defaultValue: 0 } // Total count of masters present
+});
+
+// --- STAFF MODEL ---
+export const Staff = sequelize.define('Staff', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING, allowNull: false },
+  role: { type: DataTypes.STRING, allowNull: false }, // HOD, Supervisor, Helper
+  status: { type: DataTypes.STRING, defaultValue: 'Active' }
+});
+
 export { sequelize };
 
 export default {
@@ -404,5 +430,7 @@ export default {
   Inventory,
   FabricChangeApproval,
   Table,
-  FabricUnitConversionLog
+  FabricUnitConversionLog,
+  Attendance,
+  Staff
 };

@@ -13,11 +13,18 @@ export const getTables = async (req, res) => {
     }
 
     const tables = await Table.findAll({
-      include: [{
-        model: User,
-        as: 'Supervisor',
-        attributes: ['id', 'name', 'email']
-      }]
+      include: [
+        {
+          model: User,
+          as: 'Supervisor',
+          attributes: ['id', 'name', 'email']
+        },
+        {
+          model: User,
+          as: 'CutterMaster',
+          attributes: ['id', 'name', 'email']
+        }
+      ]
     });
 
     // Sort numerically: Table 1, Table 2, ..., Table 10, Table 11, ..., Table 20
@@ -37,7 +44,7 @@ export const getTables = async (req, res) => {
 // 2. ADD NEW TABLE
 export const addTable = async (req, res) => {
   try {
-    const { name, supervisorId } = req.body;
+    const { name, supervisorId, cutterMasterId, hall } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Table name is required.' });
     }
@@ -50,16 +57,25 @@ export const addTable = async (req, res) => {
 
     const table = await Table.create({
       name: name.trim(),
-      supervisorId: supervisorId ? parseInt(supervisorId) : null
+      supervisorId: supervisorId ? parseInt(supervisorId) : null,
+      cutterMasterId: cutterMasterId ? parseInt(cutterMasterId) : null,
+      hall: hall || null
     });
 
-    // Re-fetch table with supervisor info to return to UI
+    // Re-fetch table with supervisor and cutter master info to return to UI
     const createdTable = await Table.findByPk(table.id, {
-      include: [{
-        model: User,
-        as: 'Supervisor',
-        attributes: ['id', 'name', 'email']
-      }]
+      include: [
+        {
+          model: User,
+          as: 'Supervisor',
+          attributes: ['id', 'name', 'email']
+        },
+        {
+          model: User,
+          as: 'CutterMaster',
+          attributes: ['id', 'name', 'email']
+        }
+      ]
     });
 
     res.json({ success: true, data: createdTable });
@@ -73,7 +89,7 @@ export const addTable = async (req, res) => {
 export const updateTable = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, supervisorId } = req.body;
+    const { name, supervisorId, cutterMasterId, hall } = req.body;
 
     const table = await Table.findByPk(id);
     if (!table) {
@@ -93,15 +109,30 @@ export const updateTable = async (req, res) => {
       table.supervisorId = supervisorId ? parseInt(supervisorId) : null;
     }
 
+    if (cutterMasterId !== undefined) {
+      table.cutterMasterId = cutterMasterId ? parseInt(cutterMasterId) : null;
+    }
+
+    if (hall !== undefined) {
+      table.hall = hall || null;
+    }
+
     await table.save();
 
     // Re-fetch updated table details
     const updatedTable = await Table.findByPk(id, {
-      include: [{
-        model: User,
-        as: 'Supervisor',
-        attributes: ['id', 'name', 'email']
-      }]
+      include: [
+        {
+          model: User,
+          as: 'Supervisor',
+          attributes: ['id', 'name', 'email']
+        },
+        {
+          model: User,
+          as: 'CutterMaster',
+          attributes: ['id', 'name', 'email']
+        }
+      ]
     });
 
     res.json({ success: true, data: updatedTable });

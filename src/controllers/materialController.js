@@ -1,4 +1,4 @@
-import { Material, Room, Shelf, AuditLog, DyeingMaterial, Supplier } from '../models/index.js';
+import { Material, Room, Shelf, AuditLog, DyeingMaterial, Supplier, sequelize } from '../models/index.js';
 import { Op } from 'sequelize';
 
 // Audit Log Helper
@@ -64,65 +64,14 @@ export const getMaterials = async (req, res) => {
     });
     const getSupplierName = (id) => supplierMap[id] || '—';
 
-    // 1. Fetch Materials (Normal Inventory and FabricStock(Mtrs))
-    const materials = await Material.findAll({
-      order: [['id', 'DESC']]
-    });
-
-    const mappedMaterials = materials.map(m => {
-      const item = m.toJSON ? m.toJSON() : { ...m };
-      item.inventoryType = (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory';
-      item.receivedDate = item.receivedDate || '';
-      return item;
-    });
-
-    // 2. Fetch Dyeing Materials (Dyeing Material)
-    const dyeingMaterials = await DyeingMaterial.findAll({
-      order: [['id', 'DESC']]
-    });
-
-    const mappedDyeing = dyeingMaterials.map(dm => {
-      const item = dm.toJSON ? dm.toJSON() : { ...dm };
-      return {
-        id: `dyeing-${item.id}`,
-        code: item.barcodeId || `DYE-${item.id}`,
-        name: item.fabricName || item.cmfName || 'Dyeing Fabric',
-        category: 'Dyeing',
-        subCategory: item.group || '',
-        color: item.shade || '',
-        supplier: null,
-        weight: parseFloat(item.weight) || 0.00,
-        rolls: 1,
-        unit: 'Roll',
-        location: item.location || '',
-        status: item.batchStatus === 'Completed' ? 'Active' : 'Inactive',
-        lotNo: item.lotNumber || '',
-        receivedDate: item.date || '',
-        inventoryType: 'Dyeing Material',
-        createdAt: item.createdAt,
-        updatedAt: item.updatedAt
-      };
-    });
-
-    let combined = [...mappedMaterials, ...mappedDyeing];
-
-    // Compute unique filter options from the entire unfiltered combined list
-    const filterOptions = {
-      categories: [...new Set(combined.map(m => m.category).filter(Boolean))].sort(),
-      colors: [...new Set(combined.map(m => m.color).filter(Boolean))].sort(),
-      locations: [...new Set(combined.map(m => m.location).filter(Boolean))].sort(),
-      names: [...new Set(combined.map(m => m.name).filter(Boolean))].sort(),
-      subCategories: [...new Set(combined.map(m => m.subCategory).filter(Boolean))].sort(),
-      suppliers: [...new Set(suppliers.map(s => s.name).filter(Boolean))].sort()
-    };
-
-    // Apply filters in JS
+    // Parse filters
     const parseQueryArray = (val) => {
       if (!val) return [];
       return val.split(',').map(v => v.trim()).filter(Boolean);
     };
 
-    const searchQ = req.query.search ? req.query.search.toLowerCase() : '';
+    const searchQ = req.query.search ? req.query.search.trim() : '';
+    const barcodeSeries = req.query.barcodeSeries || 'All'; // 'All', '9', 'MAT', 'DYE', 'Plain'
     const selCats = parseQueryArray(req.query.category);
     const selSubCats = parseQueryArray(req.query.subCategory);
     const selStatuses = parseQueryArray(req.query.status);
@@ -134,73 +83,248 @@ export const getMaterials = async (req, res) => {
     const startDate = req.query.startDate || '';
     const endDate = req.query.endDate || '';
 
-    let filtered = combined.filter(m => {
-      // 1. Search Query
-      const matchQ = !searchQ || 
-        (m.name && m.name.toLowerCase().includes(searchQ)) || 
-        (m.code && m.code.toLowerCase().includes(searchQ)) || 
-        (m.location && m.location.toLowerCase().includes(searchQ));
+    // Initialize WHERE clauses
+    const materialWhere = {};
+    const dyeingWhere = {};
 
-      // 2. Categories
-      const matchCat = selCats.length === 0 || selCats.includes(m.category);
+    // 1. Search Query
+    if (searchQ) {
+      materialWhere[Op.or] = [
+        { name: { [Op.like]: `%${searchQ}%` } },
+        { code: { [Op.like]: `%${searchQ}%` } },
+        { location: { [Op.like]: `%${searchQ}%` } },
+        { lotNo: { [Op.like]: `%${searchQ}%` } }
+      ];
+      dyeingWhere[Op.or] = [
+        { fabricName: { [Op.like]: `%${searchQ}%` } },
+        { barcodeId: { [Op.like]: `%${searchQ}%` } },
+        { location: { [Op.like]: `%${searchQ}%` } },
+        { lotNumber: { [Op.like]: `%${searchQ}%` } }
+      ];
+    }
 
-      // 3. Subcategories
-      const matchSubCat = selSubCats.length === 0 || selSubCats.includes(m.subCategory);
+    // 2. Barcode Series Segregation
+    if (barcodeSeries === '9') {
+      materialWhere.code = { [Op.like]: '9%' };
+      dyeingWhere.id = null; // Dyeing barcodes do not start with 9
+    } else if (barcodeSeries === 'MAT') {
+      materialWhere.code = { [Op.like]: 'MAT%' };
+      dyeingWhere.id = null;
+    } else if (barcodeSeries === 'DYE') {
+      materialWhere.id = null;
+      // Match all dyeing materials
+    } else if (barcodeSeries === 'Plain') {
+      materialWhere.code = {
+        [Op.and]: [
+          { [Op.notLike]: '9%' },
+          { [Op.notLike]: 'MAT%' },
+          { [Op.notLike]: 'DYE%' }
+        ]
+      };
+      dyeingWhere.id = null;
+    }
 
-      // 4. Status
-      const matchStatus = selStatuses.length === 0 || selStatuses.includes(m.status);
+    // 3. Categories
+    if (selCats.length > 0) {
+      materialWhere.category = { [Op.in]: selCats };
+      if (!selCats.includes('Dyeing')) {
+        dyeingWhere.id = null;
+      }
+    }
 
-      // 5. Suppliers
-      const matchSupplier = selSuppliers.length === 0 || selSuppliers.includes(getSupplierName(m.supplier));
+    // 4. Subcategories
+    if (selSubCats.length > 0) {
+      materialWhere.subCategory = { [Op.in]: selSubCats };
+      dyeingWhere.group = { [Op.in]: selSubCats };
+    }
 
-      // 6. Colors
-      const matchColor = selColors.length === 0 || selColors.includes(m.color);
+    // 5. Status
+    if (selStatuses.length > 0) {
+      materialWhere.status = { [Op.in]: selStatuses };
+      const dyeingStatuses = [];
+      if (selStatuses.includes('Active')) dyeingStatuses.push('Completed');
+      if (selStatuses.includes('Inactive') || selStatuses.includes('Low Stock')) {
+        dyeingStatuses.push('Pending', 'In Progress', 'Failed', 'Cancelled');
+      }
+      dyeingWhere.batchStatus = { [Op.in]: dyeingStatuses };
+    }
 
-      // 7. Locations
-      const matchLocation = selLocations.length === 0 || selLocations.includes(m.location);
+    // 6. Suppliers
+    if (selSuppliers.length > 0) {
+      const matchingSuppliers = suppliers.filter(s => selSuppliers.includes(s.name)).map(s => s.id);
+      materialWhere.supplier = { [Op.in]: matchingSuppliers };
+      dyeingWhere.id = null;
+    }
 
-      // 8. Names
-      const matchName = selNames.length === 0 || selNames.includes(m.name);
+    // 7. Colors
+    if (selColors.length > 0) {
+      materialWhere.color = { [Op.in]: selColors };
+      dyeingWhere.shade = { [Op.in]: selColors };
+    }
 
-      // 9. Types
-      const matchType = selTypes.length === 0 || selTypes.includes(m.inventoryType);
+    // 8. Locations
+    if (selLocations.length > 0) {
+      materialWhere.location = { [Op.in]: selLocations };
+      dyeingWhere.location = { [Op.in]: selLocations };
+    }
 
-      // 10. Date Range
-      let matchDate = true;
-      if (m.receivedDate) {
-        let itemDateStr = m.receivedDate;
-        if (/^\d{2}-\d{2}-\d{4}$/.test(itemDateStr)) {
-          const parts = itemDateStr.split('-');
-          itemDateStr = `${parts[2]}-${parts[1]}-${parts[0]}`;
-        }
-        if (itemDateStr.includes('T')) {
-          itemDateStr = itemDateStr.split('T')[0];
-        }
-        if (startDate && itemDateStr < startDate) matchDate = false;
-        if (endDate && itemDateStr > endDate) matchDate = false;
-      } else {
-        if (startDate || endDate) matchDate = false;
+    // 9. Names
+    if (selNames.length > 0) {
+      materialWhere.name = { [Op.in]: selNames };
+      dyeingWhere.fabricName = { [Op.in]: selNames };
+    }
+
+    // 10. Types
+    if (selTypes.length > 0) {
+      const hasNormal = selTypes.includes('Normal Inventory');
+      const hasMtr = selTypes.includes('FabricStock(Mtrs)');
+      const hasDye = selTypes.includes('Dyeing Material');
+
+      if (!hasDye) {
+        dyeingWhere.id = null;
       }
 
-      return matchQ && matchCat && matchSubCat && matchStatus && matchSupplier && matchColor && matchLocation && matchName && matchType && matchDate;
+      if (hasNormal && hasMtr) {
+        // no unit filter
+      } else if (hasNormal) {
+        materialWhere.unit = { [Op.or]: [{ [Op.ne]: 'MTR' }, { [Op.is]: null }] };
+      } else if (hasMtr) {
+        materialWhere.unit = { [Op.or]: ['MTR', 'Mtr'] };
+      } else {
+        materialWhere.id = null;
+      }
+    }
+
+    // 11. Date Range
+    if (startDate || endDate) {
+      const dateRangeCond = {};
+      if (startDate) dateRangeCond[Op.gte] = startDate;
+      if (endDate) dateRangeCond[Op.lte] = endDate;
+      
+      materialWhere.receivedDate = dateRangeCond;
+      dyeingWhere.date = dateRangeCond;
+    }
+
+    // Map Dyeing items helper
+    const mapDyeingItem = (item) => ({
+      id: `dyeing-${item.id}`,
+      code: item.barcodeId || `DYE-${item.id}`,
+      name: item.fabricName || item.cmfName || 'Dyeing Fabric',
+      category: 'Dyeing',
+      subCategory: item.group || '',
+      color: item.shade || '',
+      supplier: null,
+      weight: parseFloat(item.weight) || 0.00,
+      rolls: 1,
+      unit: 'Roll',
+      location: item.location || '',
+      status: item.batchStatus === 'Completed' ? 'Active' : 'Inactive',
+      lotNo: item.lotNumber || '',
+      receivedDate: item.date || '',
+      inventoryType: 'Dyeing Material',
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt
     });
 
+    // Query counts
+    const [materialsCount, dyeingCount] = await Promise.all([
+      Material.count({ where: materialWhere }),
+      DyeingMaterial.count({ where: dyeingWhere })
+    ]);
+    const totalCount = materialsCount + dyeingCount;
+
+    // Fetch paginated data
+    let combinedFiltered = [];
     if (page !== null) {
-      // Pagination requested
       const offset = (page - 1) * limit;
-      const paginatedData = filtered.slice(offset, offset + limit);
+      if (offset < materialsCount) {
+        const limitFromMaterials = Math.min(limit, materialsCount - offset);
+        const mats = await Material.findAll({
+          where: materialWhere,
+          order: [['id', 'DESC']],
+          limit: limitFromMaterials,
+          offset: offset
+        });
+        
+        combinedFiltered.push(...mats.map(m => {
+          const item = m.toJSON ? m.toJSON() : { ...m };
+          item.inventoryType = (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory';
+          item.receivedDate = item.receivedDate || '';
+          return item;
+        }));
+
+        if (combinedFiltered.length < limit) {
+          const limitFromDyeing = limit - combinedFiltered.length;
+          const dyeings = await DyeingMaterial.findAll({
+            where: dyeingWhere,
+            order: [['id', 'DESC']],
+            limit: limitFromDyeing,
+            offset: 0
+          });
+          combinedFiltered.push(...dyeings.map(mapDyeingItem));
+        }
+      } else {
+        const dyeingOffset = offset - materialsCount;
+        const dyeings = await DyeingMaterial.findAll({
+          where: dyeingWhere,
+          order: [['id', 'DESC']],
+          limit: limit,
+          offset: dyeingOffset
+        });
+        combinedFiltered.push(...dyeings.map(mapDyeingItem));
+      }
+    } else {
+      // Export case: Load all matching records
+      const [mats, dyeings] = await Promise.all([
+        Material.findAll({ where: materialWhere, order: [['id', 'DESC']] }),
+        DyeingMaterial.findAll({ where: dyeingWhere, order: [['id', 'DESC']] })
+      ]);
+      combinedFiltered.push(...mats.map(m => {
+        const item = m.toJSON ? m.toJSON() : { ...m };
+        item.inventoryType = (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory';
+        item.receivedDate = item.receivedDate || '';
+        return item;
+      }));
+      combinedFiltered.push(...dyeings.map(mapDyeingItem));
+    }
+
+    // Load filter options dynamically using optimized distinct queries
+    const [uniqueCatsMats, uniqueColorsMats, uniqueLocationsMats, uniqueNamesMats, uniqueSubCatsMats] = await Promise.all([
+      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('category')), 'category']], raw: true }),
+      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('color')), 'color']], raw: true }),
+      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
+      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('name')), 'name']], raw: true }),
+      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('subCategory')), 'subCategory']], raw: true }),
+    ]);
+
+    const [uniqueColorsDye, uniqueLocationsDye, uniqueNamesDye, uniqueSubCatsDye] = await Promise.all([
+      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('shade')), 'color']], raw: true }),
+      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
+      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('fabricName')), 'name']], raw: true }),
+      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('group')), 'subCategory']], raw: true }),
+    ]);
+
+    const filterOptions = {
+      categories: [...new Set([...uniqueCatsMats.map(x => x.category), 'Dyeing'])].filter(Boolean).sort(),
+      colors: [...new Set([...uniqueColorsMats.map(x => x.color), ...uniqueColorsDye.map(x => x.color)])].filter(Boolean).sort(),
+      locations: [...new Set([...uniqueLocationsMats.map(x => x.location), ...uniqueLocationsDye.map(x => x.location)])].filter(Boolean).sort(),
+      names: [...new Set([...uniqueNamesMats.map(x => x.name), ...uniqueNamesDye.map(x => x.name)])].filter(Boolean).sort(),
+      subCategories: [...new Set([...uniqueSubCatsMats.map(x => x.subCategory), ...uniqueSubCatsDye.map(x => x.subCategory)])].filter(Boolean).sort(),
+      suppliers: [...new Set(suppliers.map(s => s.name).filter(Boolean))].sort()
+    };
+
+    if (page !== null) {
       res.json({
         success: true,
-        data: paginatedData,
-        totalCount: filtered.length,
-        totalPages: Math.ceil(filtered.length / limit),
+        data: combinedFiltered,
+        totalCount: totalCount,
+        totalPages: Math.ceil(totalCount / limit),
         currentPage: page,
         limit,
         filterOptions
       });
     } else {
-      // Flat array (backward compatibility)
-      res.json(filtered);
+      res.json(combinedFiltered);
     }
   } catch (error) {
     res.status(500).json({ error: error.message });

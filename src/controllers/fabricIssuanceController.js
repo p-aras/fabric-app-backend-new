@@ -815,6 +815,7 @@ export const getCutterMasterIssuanceReport = async (req, res) => {
     const [issuances, tables] = await Promise.all([
       FabricIssuance.findAll({
         where: whereClause,
+        attributes: ['id', 'issuedAt', 'issuedItems', 'fabric', 'lotNumber', 'totalQuantity', 'totalWeight'],
         order: [['issuedAt', 'DESC']]
       }),
       Table.findAll({

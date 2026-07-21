@@ -408,3 +408,37 @@ export const getUsers = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// CREATE QUICK USER (for free-form supervisors/staff creation)
+export const createQuickUser = async (req, res) => {
+  try {
+    const { name, role } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    const normalizedName = name.trim();
+    // Check if name already exists
+    const existing = await User.findOne({ where: { name: normalizedName } });
+    if (existing) {
+      return res.json({ success: true, data: existing });
+    }
+
+    const email = `${normalizedName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now()}@twms.com`;
+    const hashedPassword = await bcrypt.hash('123456', 10);
+
+    const user = await User.create({
+      name: normalizedName,
+      email,
+      password: hashedPassword,
+      role: role || 'Supervisor',
+      status: 'Active',
+      isVerified: true
+    });
+
+    res.status(201).json({ success: true, data: user });
+  } catch (err) {
+    console.error('Create quick user failed:', err);
+    res.status(500).json({ error: 'Failed to create user', details: err.message });
+  }
+};

@@ -235,6 +235,68 @@ const startServer = async () => {
       }
     }
 
+    try {
+      await sequelize.query('ALTER TABLE `Attendances` ADD COLUMN `masters` TEXT NULL');
+      console.log('Database schema updated: masters column added to Attendances.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `attendances` ADD COLUMN `masters` TEXT NULL');
+          console.log('Database schema updated: masters column added to attendances (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure masters column on Attendances table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
+    try {
+      await sequelize.query('ALTER TABLE `Attendances` ADD COLUMN `mastersCount` INTEGER DEFAULT 0');
+      console.log('Database schema updated: mastersCount column added to Attendances.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `attendances` ADD COLUMN `mastersCount` INTEGER DEFAULT 0');
+          console.log('Database schema updated: mastersCount column added to attendances (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure mastersCount column on Attendances table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
+    try {
+      await sequelize.query('ALTER TABLE `Attendances` ADD COLUMN `hods` TEXT NULL');
+      console.log('Database schema updated: hods column added to Attendances.');
+    } catch (err) {
+      if (!err.message.includes('duplicate column') && !err.message.includes('already exists') && !err.message.includes('Duplicate column')) {
+        try {
+          await sequelize.query('ALTER TABLE `attendances` ADD COLUMN `hods` TEXT NULL');
+          console.log('Database schema updated: hods column added to attendances (lowercase).');
+        } catch (subErr) {
+          if (!subErr.message.includes('duplicate column') && !subErr.message.includes('already exists') && !subErr.message.includes('Duplicate column')) {
+            console.error('Failed to ensure hods column on Attendances table (both cases):', subErr);
+          }
+        }
+      }
+    }
+
+    try {
+      await sequelize.query('ALTER TABLE `Attendances` MODIFY `hodName` VARCHAR(255) NULL');
+      await sequelize.query('ALTER TABLE `Attendances` MODIFY `hodStatus` VARCHAR(255) NULL');
+      console.log('Database schema updated: hodName and hodStatus columns set to NULL in Attendances.');
+    } catch (err) {
+      try {
+        await sequelize.query('ALTER TABLE `attendances` MODIFY `hodName` VARCHAR(255) NULL');
+        await sequelize.query('ALTER TABLE `attendances` MODIFY `hodStatus` VARCHAR(255) NULL');
+        console.log('Database schema updated: hodName and hodStatus columns set to NULL in attendances (lowercase).');
+      } catch (subErr) {
+        // SQLite doesn't support MODIFY directly, which is fine since sync handles it or it's not strictly needed for SQLite
+      }
+    }
+
     // Seed defaults if database tables are empty
     await seedDatabase();
 

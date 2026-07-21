@@ -197,10 +197,51 @@ export const getIssuedRolls = async (req, res) => {
       });
     });
 
-    console.log(`✅ Returning ${allIssuedRolls.length} mapped issued rolls for Lot ${lotNumber}`);
+    // Extract Kharcha items issued for this lot
+    const kharchaMap = {};
+    issuances.forEach(iss => {
+      if (iss.kharchaItems) {
+        try {
+          const kItems = JSON.parse(iss.kharchaItems);
+          if (Array.isArray(kItems)) {
+            kItems.forEach(k => {
+              if (!k.item) return;
+              const key = String(k.item).trim();
+              const weight = parseFloat(k.weight) || 0;
+              if (!kharchaMap[key]) {
+                kharchaMap[key] = {
+                  item: key,
+                  originalWeight: 0,
+                  totalReturnedWeight: 0,
+                  availableToReturn: 0
+                };
+              }
+              kharchaMap[key].originalWeight += weight;
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing kharchaItems:', e);
+        }
+      }
+    });
+
+    const kharchaReturns = returns.filter(r => String(r.originalBarcodeId).startsWith('KHARCHA-'));
+    kharchaReturns.forEach(r => {
+      const key = String(r.originalBarcodeId).replace('KHARCHA-', '').trim();
+      if (kharchaMap[key]) {
+        kharchaMap[key].totalReturnedWeight += parseFloat(r.returnedWeight || r.weight || 0);
+      }
+    });
+
+    Object.values(kharchaMap).forEach(k => {
+      k.availableToReturn = Math.max(0, k.originalWeight - k.totalReturnedWeight);
+    });
+
+    console.log(`✅ Returning ${allIssuedRolls.length} mapped issued rolls and ${Object.keys(kharchaMap).length} kharcha items for Lot ${lotNumber}`);
     res.json({
       success: true,
-      data: allIssuedRolls
+      data: allIssuedRolls,
+      kharcha: Object.values(kharchaMap)
     });
   } catch (error) {
     console.error('Error in getIssuedRolls:', error);
@@ -543,6 +584,27 @@ export const updateReturnSticker = async (req, res) => {
         authorizedPerson: authorizedBy || returnRecord.authorizedBy || '',
         receivedDate: new Date().toISOString().slice(0, 10),
         lotNo: originalRoll.lotNumber || ''
+      }, { transaction });
+    } else if (originalBarcodeId && originalBarcodeId.startsWith('KHARCHA-')) {
+      // Create matching Material record for active accessory inventory
+      await Material.create({
+        code: newBarcodeId,
+        name: returnRecord.fabricName || 'Returned Accessories',
+        category: 'Accessories',
+        subCategory: 'Kharcha',
+        color: returnRecord.shade || 'N/A',
+        supplier: null,
+        weight: parseFloat(returnRecord.returnedWeight) || 0.00,
+        rolls: 1,
+        unit: 'Pcs',
+        location: location || returnRecord.location || '',
+        status: 'Active',
+        stockKg: parseFloat(returnRecord.returnedWeight) || 0.00,
+        billNumber: '',
+        receivedPerson: receivedBy || returnRecord.receivedBy || '',
+        authorizedPerson: authorizedBy || returnRecord.authorizedBy || '',
+        receivedDate: new Date().toISOString().slice(0, 10),
+        lotNo: returnRecord.lotNumber || ''
       }, { transaction });
     }
 
