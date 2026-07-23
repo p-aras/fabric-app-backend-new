@@ -70,7 +70,9 @@ import {
   fetchPoAuditReport,
   fetchIssuedLots,
   getDyeingShortageReportFromSheet,
-  getDailyCuttingReportData
+  getDailyCuttingReportData,
+  getTableWiseClassification,
+  debugLotCutting
 } from '../controllers/sheetsController.js';
 
 import {
@@ -171,6 +173,8 @@ router.get('/debug-lot/:lotNumber', async (req, res) => {
   }
 });
 
+router.get('/debug-lot-cutting/:lot', debugLotCutting);
+
 router.get('/debug-issuances', async (req, res) => {
   try {
     const issuances = await FabricIssuance.findAll({ raw: true });
@@ -189,6 +193,7 @@ router.get('/google-sheets/fabric-rolls', fetchInventoryRolls);
 router.get('/google-sheets/pending-cutting', getPendingCuttingLots);
 router.get('/google-sheets/issued-lots', fetchIssuedLots);
 router.get('/reports/daily-cutting-completed', getDailyCuttingReportData);
+router.get('/reports/table-wise-classification', getTableWiseClassification);
 
 router.get('/inventory', getRawInventory);
 router.get('/reports/daily-inventory-quantity', getDailyInventoryReport);

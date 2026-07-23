@@ -1,4 +1,4 @@
-import { Material, Room, DyeingMaterial, JobOrder, Inventory, Supplier, FabricIssuance } from '../models/index.js';
+import { Material, Room, DyeingMaterial, JobOrder, Inventory, Supplier, FabricIssuance, Table, User } from '../models/index.js';
 import { addAuditLog, checkShelfCapacity } from './materialController.js';
 import { Op } from 'sequelize';
 import sequelize from '../config/db.js';
@@ -907,6 +907,7 @@ export const getDailyInventoryReport = async (req, res) => {
       weight: parseFloat(m.weight) || 0,
       rolls: m.rolls || 1,
       unit: m.unit || 'Roll',
+      supplier: m.supplier || '—',
       createdAt: m.createdAt
     }));
 
@@ -920,6 +921,7 @@ export const getDailyInventoryReport = async (req, res) => {
       weight: parseFloat(dm.weight) || 0,
       rolls: dm.rollNumber || 1,
       unit: dm.unit || 'KGS',
+      supplier: dm.cmfName || '—',
       createdAt: dm.createdAt
     }));
 
@@ -1862,158 +1864,336 @@ let cachedPendingCuttingData = null;
 let lastPendingCuttingFetch = 0;
 const CUTTING_CACHE_TTL = 30000; // 30 seconds
 
+const fetchPendingCuttingDataFromSheets = async (isRefresh = false) => {
+  const now = Date.now();
+  if (!isRefresh && cachedPendingCuttingData && (now - lastPendingCuttingFetch < CUTTING_CACHE_TTL)) {
+    console.log('[Sheets API] Returning cached pending cutting data...');
+    return cachedPendingCuttingData;
+  }
+
+  console.log('[Sheets API] Fetching fresh cutting data from Google Sheets...');
+
+  const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
+  const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+  const JOB_RANGE = "JobOrder!A:AZ";
+  const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+  const INDEX_SHEET_NAME = "Index";
+  const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
+  const CUTTING_SHEET_NAME = "Cutting";
+  const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
+
+  // 1. Fetch Job Orders
+  const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
+  let jobRows = convertValuesToObjects(jobRes.values);
+
+  // 2. Fetch Index sheet from Budget Report
+  const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+  const idxValues = idxRes.values || [];
+  const idxHeader = idxValues[0] || [];
+  const indexMap = new Map();
+  for (let i = 1; i < idxValues.length; i++) {
+    const entry = parseIndexRow(idxHeader, idxValues[i]);
+    if (entry) indexMap.set(entry.lot, entry);
+  }
+
+  // 3. Fetch large Cutting matrix
+  const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
+  const bigCuttingValues = cuttingRes.values || [];
+
+  // 4. Merge sheets and calculate pending remarks
+  const lots = Array.from(
+    new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
+  );
+
+  const lotToSummary = new Map();
+  const pendingListTmp = {};
+
+  for (const lot of lots) {
+    const ix = indexMap.get(lot);
+    if (!ix) {
+      lotToSummary.set(lot, {
+        totalQty: 0,
+        remarks: "",
+        remarks2: "",
+        remarks3: "Fabric Issue Pending",
+        cuttingDate: "",
+        cuttingTables: []
+      });
+      pendingListTmp[lot] = [];
+      continue;
+    }
+
+    const cuttingDate = formatSavedAtToYMD(ix.savedAt);
+    const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
+    const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
+    const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
+    const cuttingTables = extractCuttingTables(window, ix.sizes);
+
+    const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
+    const pendingList = Array.from(pendingShadeKeys).map(
+      (k) => shadeKeyToOriginal.get(k) || k
+    );
+
+    let remarks = "";
+    let remarks2 = "";
+    let remarks3 = "";
+
+    if (pendingShadeKeys.size > 0) {
+      remarks2 = "Colour Pending";
+    } else {
+      remarks = "Cutting Done";
+    }
+
+    lotToSummary.set(lot, {
+      totalQty,
+      remarks,
+      remarks2,
+      remarks3,
+      cuttingDate,
+      cuttingTables
+    });
+    pendingListTmp[lot] = pendingList;
+  }
+
+  const merged = jobRows.map((r) => {
+    const lot = String(r["Lot No"] || "").trim();
+    const days = daysAfter(r["PO Date"]);
+    const sum = lotToSummary.get(lot) || {
+      totalQty: 0,
+      remarks: "",
+      remarks2: "",
+      remarks3: lot ? "Fabric Issue Pending" : "",
+      cuttingDate: "",
+      cuttingTables: []
+    };
+
+    const remarksList = [sum.remarks, sum.remarks2, sum.remarks3].filter(Boolean);
+    const mergedRemarks = remarksList.join(" | ");
+
+    const cuttingTablesDisplay = sum.cuttingTables && sum.cuttingTables.length > 0
+      ? sum.cuttingTables.join(", ")
+      : "";
+
+    const hasIx = lot ? indexMap.has(lot) : false;
+
+    return {
+      ...r,
+      "Days after PO issue": days ?? "",
+      "Total Qty": sum.totalQty,
+      "Pending Shade": "",
+      "Cutting Date": sum.cuttingDate || "",
+      "Cutting Table": cuttingTablesDisplay,
+      Remarks: mergedRemarks,
+      inIndexSheet: hasIx,
+    };
+  });
+
+  const result = {
+    rows: merged,
+    pendingListByLot: pendingListTmp,
+    lastUpdated: new Date().toLocaleString()
+  };
+
+  cachedPendingCuttingData = result;
+  lastPendingCuttingFetch = now;
+  return result;
+};
+
 export const getPendingCuttingLots = async (req, res) => {
   try {
     const isRefresh = req.query.refresh === 'true';
-    const now = Date.now();
-
-    if (!isRefresh && cachedPendingCuttingData && (now - lastPendingCuttingFetch < CUTTING_CACHE_TTL)) {
-      console.log('[Sheets API] Returning cached pending cutting data...');
-      return res.json({
-        success: true,
-        ...cachedPendingCuttingData
-      });
-    }
-
-    console.log('[Sheets API] Fetching fresh cutting data from Google Sheets...');
-
-    const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
-    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
-    const JOB_RANGE = "JobOrder!A:AZ";
-    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
-    const INDEX_SHEET_NAME = "Index";
-    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
-    const CUTTING_SHEET_NAME = "Cutting";
-    const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
-
-    // 1. Fetch Job Orders
-    const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
-    let jobRows = convertValuesToObjects(jobRes.values);
-
-    // Filter out cancelled status
-    jobRows = jobRows.filter((r) => {
+    const result = await fetchPendingCuttingDataFromSheets(isRefresh);
+    
+    // Filter out cancelled status for the pending cutting lots report
+    const filteredRows = (result.rows || []).filter((r) => {
       const s = (r.Status ?? "").toString();
       const sn = norm(s);
       return !sn.startsWith("cancel");
     });
 
-    // 2. Fetch Index sheet from Budget Report
-    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
-    const idxValues = idxRes.values || [];
-    const idxHeader = idxValues[0] || [];
-    const indexMap = new Map();
-    for (let i = 1; i < idxValues.length; i++) {
-      const entry = parseIndexRow(idxHeader, idxValues[i]);
-      if (entry) indexMap.set(entry.lot, entry);
-    }
-
-    // 3. Fetch large Cutting matrix
-    const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
-    const bigCuttingValues = cuttingRes.values || [];
-
-    // 4. Merge sheets and calculate pending remarks
-    const lots = Array.from(
-      new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
-    );
-
-    const lotToSummary = new Map();
-    const pendingListTmp = {};
-
-    for (const lot of lots) {
-      const ix = indexMap.get(lot);
-      if (!ix) {
-        lotToSummary.set(lot, {
-          totalQty: 0,
-          remarks: "",
-          remarks2: "",
-          remarks3: "Fabric Issue Pending",
-          cuttingDate: "",
-          cuttingTables: []
-        });
-        pendingListTmp[lot] = [];
-        continue;
-      }
-
-      const cuttingDate = formatSavedAtToYMD(ix.savedAt);
-      const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
-      const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
-      const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
-      const cuttingTables = extractCuttingTables(window, ix.sizes);
-
-      const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
-      const pendingList = Array.from(pendingShadeKeys).map(
-        (k) => shadeKeyToOriginal.get(k) || k
-      );
-
-      let remarks = "";
-      let remarks2 = "";
-      let remarks3 = "";
-
-      if (pendingShadeKeys.size > 0) {
-        remarks2 = "Colour Pending";
-      } else {
-        remarks = "Cutting Done";
-      }
-
-      lotToSummary.set(lot, {
-        totalQty,
-        remarks,
-        remarks2,
-        remarks3,
-        cuttingDate,
-        cuttingTables
-      });
-      pendingListTmp[lot] = pendingList;
-    }
-
-    const merged = jobRows.map((r) => {
-      const lot = String(r["Lot No"] || "").trim();
-      const days = daysAfter(r["PO Date"]);
-      const sum = lotToSummary.get(lot) || {
-        totalQty: 0,
-        remarks: "",
-        remarks2: "",
-        remarks3: lot ? "Fabric Issue Pending" : "",
-        cuttingDate: "",
-        cuttingTables: []
-      };
-
-      const remarksList = [sum.remarks, sum.remarks2, sum.remarks3].filter(Boolean);
-      const mergedRemarks = remarksList.join(" | ");
-
-      const cuttingTablesDisplay = sum.cuttingTables && sum.cuttingTables.length > 0
-        ? sum.cuttingTables.join(", ")
-        : "";
-
-      const hasIx = lot ? indexMap.has(lot) : false;
-
-      return {
-        ...r,
-        "Days after PO issue": days ?? "",
-        "Total Qty": sum.totalQty,
-        "Pending Shade": "",
-        "Cutting Date": sum.cuttingDate || "",
-        "Cutting Table": cuttingTablesDisplay,
-        Remarks: mergedRemarks,
-        inIndexSheet: hasIx,
-      };
-    });
-
-    const result = {
-      rows: merged,
-      pendingListByLot: pendingListTmp,
-      lastUpdated: new Date().toLocaleString()
-    };
-
-    cachedPendingCuttingData = result;
-    lastPendingCuttingFetch = now;
-
     res.json({
       success: true,
-      ...result
+      rows: filteredRows,
+      pendingListByLot: result.pendingListByLot,
+      lastUpdated: result.lastUpdated
     });
   } catch (error) {
     console.error('[Sheets API] Error getting pending cutting lots:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const debugLotCutting = async (req, res) => {
+  try {
+    const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
+    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+    const JOB_RANGE = "JobOrder!A:AZ";
+    const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
+    let jobRows = convertValuesToObjects(jobRes.values);
+    
+    const rawRow = jobRows.find(r => String(r["Lot No"] || "").trim() === req.params.lot);
+    
+    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+    const INDEX_SHEET_NAME = "Index";
+    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
+    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+    const idxValues = idxRes.values || [];
+    const idxHeader = idxValues[0] || [];
+    const indexEntry = idxValues.map(v => parseIndexRow(idxHeader, v)).find(e => e && e.lot === req.params.lot);
+
+    res.json({
+      lot: req.params.lot,
+      rawRowExists: !!rawRow,
+      rawRowStatus: rawRow ? rawRow.Status : null,
+      rawRow: rawRow || null,
+      indexEntryExists: !!indexEntry,
+      indexEntry: indexEntry || null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const getTableWiseClassification = async (req, res) => {
+  try {
+    // 1. Fetch cutting status of all lots
+    const cuttingData = await fetchPendingCuttingDataFromSheets(false);
+    
+    // Create a map: lotNo -> { remarks, status }
+    const lotDetailsMap = new Map();
+    if (cuttingData && cuttingData.rows) {
+      cuttingData.rows.forEach(row => {
+        const lotNum = String(row["Lot No"] || "").trim();
+        if (lotNum) {
+          lotDetailsMap.set(lotNum, {
+            remarks: row.Remarks || "",
+            status: row.Status || ""
+          });
+        }
+      });
+    }
+
+    // 2. Fetch all FabricIssuance records from database
+    const issuances = await FabricIssuance.findAll({
+      order: [['issuedAt', 'DESC']]
+    });
+
+    // Fetch all table configurations with supervisors
+    const tablesConfig = await Table.findAll({
+      include: [
+        { model: User, as: 'Supervisor', attributes: ['name'] },
+        { model: User, as: 'CutterMaster', attributes: ['name'] }
+      ]
+    });
+    
+    const tablesMap = new Map();
+    tablesConfig.forEach(t => {
+      tablesMap.set(t.name.trim(), {
+        supervisor: t.Supervisor ? t.Supervisor.name : 'Unassigned',
+        cutterMaster: t.CutterMaster ? t.CutterMaster.name : 'Unassigned',
+        hall: t.hall || 'Unassigned'
+      });
+    });
+
+    const tableClassification = {};
+
+    for (const issuance of issuances) {
+      const lotNum = String(issuance.lotNumber || '').trim();
+      if (!lotNum) continue;
+
+      // Check if cutting is already done or lot is cancelled
+      const lotDetails = lotDetailsMap.get(lotNum) || { remarks: "", status: "" };
+      let remarks = lotDetails.remarks;
+      const status = lotDetails.status.toLowerCase();
+      
+      if (remarks.includes("Cutting Done") || status.startsWith("cancel")) {
+        // Eliminate those lots whose cutting is already done or lot is cancelled
+        continue;
+      }
+
+      if (!remarks || remarks === "Fabric Issue Pending" || remarks.includes("Fabric Issue Pending")) {
+        remarks = "Cutting Pending";
+      }
+
+      // Parse issuedItems
+      let items = [];
+      try {
+        items = issuance.issuedItems ? JSON.parse(issuance.issuedItems) : [];
+      } catch (err) {
+        console.error(`Error parsing issuedItems for issuance ${issuance.id}:`, err);
+      }
+
+      if (!Array.isArray(items)) continue;
+
+      for (const item of items) {
+        const tableNumber = (item.tableNumber || '').trim();
+        if (!tableNumber) continue;
+
+        if (!tableClassification[tableNumber]) {
+          tableClassification[tableNumber] = {};
+        }
+
+        if (!tableClassification[tableNumber][lotNum]) {
+          tableClassification[tableNumber][lotNum] = {
+            lotNumber: lotNum,
+            jobOrderNo: issuance.jobOrderNo || '',
+            fabric: issuance.fabric || '',
+            brand: issuance.brand || '',
+            issuedAt: issuance.issuedAt,
+            issuedBy: issuance.issuedBy,
+            shades: new Set(),
+            totalRolls: 0,
+            totalWeight: 0,
+            remarks: remarks || "Cutting Pending"
+          };
+        }
+
+        const lotRecord = tableClassification[tableNumber][lotNum];
+        if (item.shade) {
+          lotRecord.shades.add(item.shade);
+        }
+        lotRecord.totalRolls += parseInt(item.qty) || 0;
+        lotRecord.totalWeight += parseFloat(item.weight) || 0;
+      }
+    }
+
+    // Now format the output: group by Table, and convert shades Set to Array
+    const formattedResult = Object.keys(tableClassification).map(tableNum => {
+      const config = tablesMap.get(tableNum) || { supervisor: 'Unassigned', cutterMaster: 'Unassigned', hall: 'Unassigned' };
+      const lotsArray = Object.values(tableClassification[tableNum]).map(lotRecord => ({
+        ...lotRecord,
+        shades: Array.from(lotRecord.shades),
+        totalWeight: parseFloat(lotRecord.totalWeight.toFixed(2))
+      }));
+      
+      // Sort lots by issuedAt date desc
+      lotsArray.sort((a, b) => b.issuedAt.localeCompare(a.issuedAt));
+
+      return {
+        tableNumber: tableNum,
+        supervisor: config.supervisor,
+        cutterMaster: config.cutterMaster,
+        hall: config.hall,
+        lotsCount: lotsArray.length,
+        lots: lotsArray
+      };
+    });
+
+    // Sort tables alphabetically/numerically by tableNumber
+    formattedResult.sort((a, b) => {
+      const numA = parseInt(a.tableNumber.replace(/\D/g, '')) || 0;
+      const numB = parseInt(b.tableNumber.replace(/\D/g, '')) || 0;
+      if (numA !== numB) return numA - numB;
+      return a.tableNumber.localeCompare(b.tableNumber);
+    });
+
+    res.json({
+      success: true,
+      data: formattedResult,
+      lastUpdated: new Date().toLocaleString()
+    });
+  } catch (error) {
+    console.error('Error in getTableWiseClassification:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };

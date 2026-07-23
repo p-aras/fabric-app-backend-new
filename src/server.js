@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
-import dotenv from 'dotenv';
+import dotenv from 'dotenv'; 
+
 import app from './app.js';
 import sequelize, { getActiveDialect } from './config/db.js';
 import { seedDatabase } from './config/seed.js';
