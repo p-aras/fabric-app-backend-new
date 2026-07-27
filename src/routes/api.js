@@ -397,19 +397,16 @@ router.post('/staff', async (req, res) => {
   }
 });
 
-router.delete('/staff/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const member = await Staff.findByPk(id);
-    if (!member) {
-      return res.status(404).json({ success: false, message: 'Staff member not found.' });
-    }
-    await member.destroy();
-    res.json({ success: true, message: 'Staff member removed successfully.' });
-  } catch (error) {
-    console.error('Error removing staff member:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
+import {
+  getApprovalRequests,
+  createApprovalRequest,
+  respondApprovalRequest,
+  getApprovalStatus
+} from '../controllers/approvalController.js';
+
+router.get('/approval-requests', getApprovalRequests);
+router.post('/approval-requests', createApprovalRequest);
+router.put('/approval-requests/:id/respond', respondApprovalRequest);
+router.get('/approval-requests/status/:id', getApprovalStatus);
 
 export default router;

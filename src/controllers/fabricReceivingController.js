@@ -281,9 +281,43 @@ export const getAllReceivingHistory = async (req, res) => {
     const history = await FabricReturn.findAll({
       order: [['id', 'DESC']]
     });
+
+    const issuances = await FabricIssuance.findAll({
+      attributes: ['lotNumber', 'issuedItems']
+    });
+
+    const lotTableMap = {};
+    issuances.forEach(iss => {
+      const lot = String(iss.lotNumber || '').trim();
+      if (!lot) return;
+      if (!lotTableMap[lot]) {
+        lotTableMap[lot] = new Set();
+      }
+      try {
+        const items = iss.issuedItems ? JSON.parse(iss.issuedItems) : [];
+        if (Array.isArray(items)) {
+          items.forEach(item => {
+            if (item.tableNumber) {
+              lotTableMap[lot].add(String(item.tableNumber).trim());
+            }
+          });
+        }
+      } catch (err) {
+        // Ignore parse error
+      }
+    });
+
+    const dataWithTables = history.map(record => {
+      const recordJson = record.toJSON();
+      const lot = String(recordJson.lotNumber || '').trim();
+      const tablesSet = lotTableMap[lot];
+      recordJson.tableNumber = tablesSet && tablesSet.size > 0 ? Array.from(tablesSet).join(', ') : '—';
+      return recordJson;
+    });
+
     res.json({
       success: true,
-      data: history
+      data: dataWithTables
     });
   } catch (error) {
     console.error('Error in getAllReceivingHistory:', error);

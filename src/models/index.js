@@ -408,6 +408,19 @@ export const Staff = sequelize.define('Staff', {
   status: { type: DataTypes.STRING, defaultValue: 'Active' }
 });
 
+// --- APPROVAL REQUEST MODEL ---
+export const ApprovalRequest = sequelize.define('ApprovalRequest', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  tableNo: { type: DataTypes.STRING(50), allowNull: false },
+  requestedBy: { type: DataTypes.STRING(100), allowNull: false },
+  reason: { type: DataTypes.TEXT },
+  requestedWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  status: { type: DataTypes.STRING(20), defaultValue: 'Pending' }, // Pending, Approved, Rejected
+  respondedBy: { type: DataTypes.STRING(100) },
+  respondedAt: { type: DataTypes.DATE }
+});
+
 export { sequelize };
 
 export default {
@@ -432,5 +445,6 @@ export default {
   Table,
   FabricUnitConversionLog,
   Attendance,
-  Staff
+  Staff,
+  ApprovalRequest
 };
