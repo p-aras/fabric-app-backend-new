@@ -82,7 +82,7 @@ export const nextBarcodeId = async (req, res) => {
       }
       nextId = lastId + 1;
       barcodeId = String(nextId);
-    } else if (type === 'fabric-stock') {
+    } else if (type === 'fabric-stock' || type === 'fabric-stock-mtr') {
       const lastFabricStock = await Material.findOne({
         where: {
           code: {
@@ -94,6 +94,22 @@ export const nextBarcodeId = async (req, res) => {
       lastId = 3000000;
       if (lastFabricStock) {
         const match = lastFabricStock.code.match(/\d+/);
+        if (match) lastId = parseInt(match[0], 10);
+      }
+      nextId = lastId + 1;
+      barcodeId = String(nextId);
+    } else if (type === 'fabric-stock-kgs' || type === 'fabric-stock-kg') {
+      const lastFabricStockKgs = await Material.findOne({
+        where: {
+          code: {
+            [Op.like]: '4%'
+          }
+        },
+        order: [['code', 'DESC']]
+      });
+      lastId = 4000000;
+      if (lastFabricStockKgs) {
+        const match = lastFabricStockKgs.code.match(/\d+/);
         if (match) lastId = parseInt(match[0], 10);
       }
       nextId = lastId + 1;
