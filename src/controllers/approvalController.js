@@ -56,16 +56,35 @@ export const respondApprovalRequest = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Approval request not found' });
     }
 
+    const responder = respondedBy || req.user?.name || 'Admin';
+
     await appReq.update({
       status,
-      respondedBy: respondedBy || req.user?.name || 'Admin',
+      respondedBy: responder,
       respondedAt: new Date()
     });
 
+    // Auto-resolve any other pending approval requests for the same table
+    if (appReq.tableNo) {
+      await ApprovalRequest.update(
+        {
+          status,
+          respondedBy: responder,
+          respondedAt: new Date()
+        },
+        {
+          where: {
+            tableNo: appReq.tableNo,
+            status: 'Pending'
+          }
+        }
+      ).catch(err => console.error('Error updating matching pending requests:', err));
+    }
+
     await AuditLog.create({
       action: `Special Issuance Approval ${status}`,
-      detail: `Lot: ${appReq.lotNumber} on ${appReq.tableNo} was ${status} by ${respondedBy || 'Admin'}`,
-      user: respondedBy || 'Admin',
+      detail: `Lot: ${appReq.lotNumber} on ${appReq.tableNo} was ${status} by ${responder}`,
+      user: responder,
       date: new Date().toISOString(),
       type: 'approval_response'
     }).catch(err => console.error('AuditLog error:', err));

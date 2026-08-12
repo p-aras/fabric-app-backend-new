@@ -1878,7 +1878,8 @@ async function fetchSheet({ sheetId, range, apiKey }) {
 // Caching variables
 let cachedPendingCuttingData = null;
 let lastPendingCuttingFetch = 0;
-const CUTTING_CACHE_TTL = 30000; // 30 seconds
+let pendingCuttingFetchPromise = null;
+const CUTTING_CACHE_TTL = 300000; // 5 minutes cache TTL
 
 const fetchPendingCuttingDataFromSheets = async (isRefresh = false) => {
   const now = Date.now();
@@ -1887,132 +1888,149 @@ const fetchPendingCuttingDataFromSheets = async (isRefresh = false) => {
     return cachedPendingCuttingData;
   }
 
+  if (pendingCuttingFetchPromise) {
+    console.log('[Sheets API] Sharing in-flight Google Sheets cutting data request...');
+    return pendingCuttingFetchPromise;
+  }
+
   console.log('[Sheets API] Fetching fresh cutting data from Google Sheets...');
 
-  const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
-  const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
-  const JOB_RANGE = "JobOrder!A:AZ";
-  const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
-  const INDEX_SHEET_NAME = "Index";
-  const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
-  const CUTTING_SHEET_NAME = "Cutting";
-  const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
+  pendingCuttingFetchPromise = (async () => {
+    try {
+      const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
+      const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+      const JOB_RANGE = "JobOrder!A:AZ";
+      const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+      const INDEX_SHEET_NAME = "Index";
+      const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
+      const CUTTING_SHEET_NAME = "Cutting";
+      const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
 
-  // 1. Fetch Job Orders
-  const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
-  let jobRows = convertValuesToObjects(jobRes.values);
+      // 1. Fetch Job Orders
+      const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
+      let jobRows = convertValuesToObjects(jobRes.values);
 
-  // 2. Fetch Index sheet from Budget Report
-  const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
-  const idxValues = idxRes.values || [];
-  const idxHeader = idxValues[0] || [];
-  const indexMap = new Map();
-  for (let i = 1; i < idxValues.length; i++) {
-    const entry = parseIndexRow(idxHeader, idxValues[i]);
-    if (entry) indexMap.set(entry.lot, entry);
-  }
+      // 2. Fetch Index sheet from Budget Report
+      const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+      const idxValues = idxRes.values || [];
+      const idxHeader = idxValues[0] || [];
+      const indexMap = new Map();
+      for (let i = 1; i < idxValues.length; i++) {
+        const entry = parseIndexRow(idxHeader, idxValues[i]);
+        if (entry) indexMap.set(entry.lot, entry);
+      }
 
-  // 3. Fetch large Cutting matrix
-  const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
-  const bigCuttingValues = cuttingRes.values || [];
+      // 3. Fetch large Cutting matrix
+      const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
+      const bigCuttingValues = cuttingRes.values || [];
 
-  // 4. Merge sheets and calculate pending remarks
-  const lots = Array.from(
-    new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
-  );
+      // 4. Merge sheets and calculate pending remarks
+      const lots = Array.from(
+        new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
+      );
 
-  const lotToSummary = new Map();
-  const pendingListTmp = {};
+      const lotToSummary = new Map();
+      const pendingListTmp = {};
 
-  for (const lot of lots) {
-    const ix = indexMap.get(lot);
-    if (!ix) {
-      lotToSummary.set(lot, {
-        totalQty: 0,
-        remarks: "",
-        remarks2: "",
-        remarks3: "Fabric Issue Pending",
-        cuttingDate: "",
-        cuttingTables: []
+      for (const lot of lots) {
+        const ix = indexMap.get(lot);
+        if (!ix) {
+          lotToSummary.set(lot, {
+            totalQty: 0,
+            remarks: "",
+            remarks2: "",
+            remarks3: "Fabric Issue Pending",
+            cuttingDate: "",
+            cuttingTables: []
+          });
+          pendingListTmp[lot] = [];
+          continue;
+        }
+
+        const cuttingDate = formatSavedAtToYMD(ix.savedAt);
+        const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
+        const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
+        const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
+        const cuttingTables = extractCuttingTables(window, ix.sizes);
+
+        const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
+        const pendingList = Array.from(pendingShadeKeys).map(
+          (k) => shadeKeyToOriginal.get(k) || k
+        );
+
+        let remarks = "";
+        let remarks2 = "";
+        let remarks3 = "";
+
+        if (pendingShadeKeys.size > 0) {
+          remarks2 = "Colour Pending";
+        } else {
+          remarks = "Cutting Done";
+        }
+
+        lotToSummary.set(lot, {
+          totalQty,
+          remarks,
+          remarks2,
+          remarks3,
+          cuttingDate,
+          cuttingTables
+        });
+        pendingListTmp[lot] = pendingList;
+      }
+
+      const merged = jobRows.map((r) => {
+        const lot = String(r["Lot No"] || "").trim();
+        const days = daysAfter(r["PO Date"]);
+        const sum = lotToSummary.get(lot) || {
+          totalQty: 0,
+          remarks: "",
+          remarks2: "",
+          remarks3: lot ? "Fabric Issue Pending" : "",
+          cuttingDate: "",
+          cuttingTables: []
+        };
+
+        const remarksList = [sum.remarks, sum.remarks2, sum.remarks3].filter(Boolean);
+        const mergedRemarks = remarksList.join(" | ");
+
+        const cuttingTablesDisplay = sum.cuttingTables && sum.cuttingTables.length > 0
+          ? sum.cuttingTables.join(", ")
+          : "";
+
+        const hasIx = lot ? indexMap.has(lot) : false;
+
+        return {
+          ...r,
+          "Days after PO issue": days ?? "",
+          "Total Qty": sum.totalQty,
+          "Pending Shade": "",
+          "Cutting Date": sum.cuttingDate || "",
+          "Cutting Table": cuttingTablesDisplay,
+          Remarks: mergedRemarks,
+          inIndexSheet: hasIx,
+        };
       });
-      pendingListTmp[lot] = [];
-      continue;
+
+      const result = {
+        rows: merged,
+        pendingListByLot: pendingListTmp,
+        lastUpdated: new Date().toLocaleString()
+      };
+
+      cachedPendingCuttingData = result;
+      lastPendingCuttingFetch = Date.now();
+      return result;
+    } catch (err) {
+      console.error('[Sheets API] Error fetching cutting data:', err);
+      if (cachedPendingCuttingData) return cachedPendingCuttingData;
+      throw err;
+    } finally {
+      pendingCuttingFetchPromise = null;
     }
+  })();
 
-    const cuttingDate = formatSavedAtToYMD(ix.savedAt);
-    const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
-    const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
-    const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
-    const cuttingTables = extractCuttingTables(window, ix.sizes);
-
-    const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
-    const pendingList = Array.from(pendingShadeKeys).map(
-      (k) => shadeKeyToOriginal.get(k) || k
-    );
-
-    let remarks = "";
-    let remarks2 = "";
-    let remarks3 = "";
-
-    if (pendingShadeKeys.size > 0) {
-      remarks2 = "Colour Pending";
-    } else {
-      remarks = "Cutting Done";
-    }
-
-    lotToSummary.set(lot, {
-      totalQty,
-      remarks,
-      remarks2,
-      remarks3,
-      cuttingDate,
-      cuttingTables
-    });
-    pendingListTmp[lot] = pendingList;
-  }
-
-  const merged = jobRows.map((r) => {
-    const lot = String(r["Lot No"] || "").trim();
-    const days = daysAfter(r["PO Date"]);
-    const sum = lotToSummary.get(lot) || {
-      totalQty: 0,
-      remarks: "",
-      remarks2: "",
-      remarks3: lot ? "Fabric Issue Pending" : "",
-      cuttingDate: "",
-      cuttingTables: []
-    };
-
-    const remarksList = [sum.remarks, sum.remarks2, sum.remarks3].filter(Boolean);
-    const mergedRemarks = remarksList.join(" | ");
-
-    const cuttingTablesDisplay = sum.cuttingTables && sum.cuttingTables.length > 0
-      ? sum.cuttingTables.join(", ")
-      : "";
-
-    const hasIx = lot ? indexMap.has(lot) : false;
-
-    return {
-      ...r,
-      "Days after PO issue": days ?? "",
-      "Total Qty": sum.totalQty,
-      "Pending Shade": "",
-      "Cutting Date": sum.cuttingDate || "",
-      "Cutting Table": cuttingTablesDisplay,
-      Remarks: mergedRemarks,
-      inIndexSheet: hasIx,
-    };
-  });
-
-  const result = {
-    rows: merged,
-    pendingListByLot: pendingListTmp,
-    lastUpdated: new Date().toLocaleString()
-  };
-
-  cachedPendingCuttingData = result;
-  lastPendingCuttingFetch = now;
-  return result;
+  return pendingCuttingFetchPromise;
 };
 
 export const getPendingCuttingLots = async (req, res) => {
@@ -2029,12 +2047,12 @@ export const getPendingCuttingLots = async (req, res) => {
 
     res.json({
       success: true,
-      rows: filteredRows,
+      data: filteredRows,
       pendingListByLot: result.pendingListByLot,
       lastUpdated: result.lastUpdated
     });
   } catch (error) {
-    console.error('[Sheets API] Error getting pending cutting lots:', error);
+    console.error('Error in getPendingCuttingLots:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -2072,8 +2090,11 @@ export const debugLotCutting = async (req, res) => {
 
 export const getTableWiseClassification = async (req, res) => {
   try {
-    // 1. Fetch cutting status of all lots
-    const cuttingData = await fetchPendingCuttingDataFromSheets(false);
+    // 1. Fetch cutting status of all lots cleanly
+    let cuttingData = await fetchPendingCuttingDataFromSheets(false).catch(err => {
+      console.warn('Cutting data fetch warning:', err.message);
+      return cachedPendingCuttingData || null;
+    });
     
     // Create a map: lotNo -> { remarks, status }
     const lotDetailsMap = new Map();
