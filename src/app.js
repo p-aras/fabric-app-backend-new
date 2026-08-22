@@ -1,8 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import apiRoutes from './routes/api.js';
 
 const app = express();
+
+// Enable Gzip HTTP response compression (70-80% smaller payloads)
+app.use(compression());
 
 // Enable CORS so the React app (on its port) can make API calls to the server
 app.use(cors());

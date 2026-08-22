@@ -401,12 +401,15 @@ import {
   getApprovalRequests,
   createApprovalRequest,
   respondApprovalRequest,
-  getApprovalStatus
+  getApprovalStatus,
+  consumeApprovalRequest
 } from '../controllers/approvalController.js';
 
 router.get('/approval-requests', getApprovalRequests);
 router.post('/approval-requests', createApprovalRequest);
 router.put('/approval-requests/:id/respond', respondApprovalRequest);
 router.get('/approval-requests/status/:id', getApprovalStatus);
+router.put('/approval-requests/:id/consume', consumeApprovalRequest);
+router.put('/approval-requests/consume', consumeApprovalRequest);
 
 export default router;

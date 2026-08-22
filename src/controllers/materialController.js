@@ -86,21 +86,27 @@ export const getMaterials = async (req, res) => {
     // Initialize WHERE clauses
     const materialWhere = {};
     const dyeingWhere = {};
+    const materialAndList = [];
+    const dyeingAndList = [];
 
     // 1. Search Query
     if (searchQ) {
-      materialWhere[Op.or] = [
-        { name: { [Op.like]: `%${searchQ}%` } },
-        { code: { [Op.like]: `%${searchQ}%` } },
-        { location: { [Op.like]: `%${searchQ}%` } },
-        { lotNo: { [Op.like]: `%${searchQ}%` } }
-      ];
-      dyeingWhere[Op.or] = [
-        { fabricName: { [Op.like]: `%${searchQ}%` } },
-        { barcodeId: { [Op.like]: `%${searchQ}%` } },
-        { location: { [Op.like]: `%${searchQ}%` } },
-        { lotNumber: { [Op.like]: `%${searchQ}%` } }
-      ];
+      materialAndList.push({
+        [Op.or]: [
+          { name: { [Op.like]: `%${searchQ}%` } },
+          { code: { [Op.like]: `%${searchQ}%` } },
+          { location: { [Op.like]: `%${searchQ}%` } },
+          { lotNo: { [Op.like]: `%${searchQ}%` } }
+        ]
+      });
+      dyeingAndList.push({
+        [Op.or]: [
+          { fabricName: { [Op.like]: `%${searchQ}%` } },
+          { barcodeId: { [Op.like]: `%${searchQ}%` } },
+          { location: { [Op.like]: `%${searchQ}%` } },
+          { lotNumber: { [Op.like]: `%${searchQ}%` } }
+        ]
+      });
     }
 
     // 2. Barcode Series Segregation
@@ -200,9 +206,41 @@ export const getMaterials = async (req, res) => {
       const dateRangeCond = {};
       if (startDate) dateRangeCond[Op.gte] = startDate;
       if (endDate) dateRangeCond[Op.lte] = endDate;
-      
-      materialWhere.receivedDate = dateRangeCond;
-      dyeingWhere.date = dateRangeCond;
+
+      const createdDateCond = {};
+      if (startDate) createdDateCond[Op.gte] = new Date(startDate + 'T00:00:00');
+      if (endDate) createdDateCond[Op.lte] = new Date(endDate + 'T23:59:59.999');
+
+      materialAndList.push({
+        [Op.or]: [
+          { receivedDate: dateRangeCond },
+          {
+            [Op.and]: [
+              { receivedDate: { [Op.or]: [null, ''] } },
+              { createdAt: createdDateCond }
+            ]
+          }
+        ]
+      });
+
+      dyeingAndList.push({
+        [Op.or]: [
+          { date: dateRangeCond },
+          {
+            [Op.and]: [
+              { date: { [Op.or]: [null, ''] } },
+              { createdAt: createdDateCond }
+            ]
+          }
+        ]
+      });
+    }
+
+    if (materialAndList.length > 0) {
+      materialWhere[Op.and] = materialAndList;
+    }
+    if (dyeingAndList.length > 0) {
+      dyeingWhere[Op.and] = dyeingAndList;
     }
 
     // Map Dyeing items helper

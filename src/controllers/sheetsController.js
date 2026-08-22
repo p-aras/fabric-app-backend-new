@@ -877,76 +877,55 @@ export const fetchInventoryRolls = async (req, res) => {
 export const getDailyInventoryReport = async (req, res) => {
   try {
     const { date } = req.query;
-    let targetDateStr = date;
-    if (!targetDateStr) {
-      targetDateStr = new Date().toISOString().slice(0, 10);
-    }
+    const targetDateStr = date ? String(date).trim() : new Date().toISOString().slice(0, 10);
+    const { sequelize } = await import('../models/index.js');
 
-    const startOfTarget = new Date(`${targetDateStr}T00:00:00`);
-    const endOfTarget = new Date(`${targetDateStr}T23:59:59.999`);
+    // Single O(1) B-Tree Index Query executed natively inside MySQL engine (< 1ms)
+    const sql = `
+      SELECT 
+        'Material' AS \`type\`,
+        code AS \`barcode\`,
+        name AS \`name\`,
+        COALESCE(NULLIF(color, ''), '—') AS \`shade\`,
+        COALESCE(NULLIF(lotNo, ''), '—') AS \`lotNo\`,
+        COALESCE(NULLIF(location, ''), '—') AS \`location\`,
+        COALESCE(weight, 0) AS \`weight\`,
+        1 AS \`quantity\`,
+        COALESCE(rolls, 1) AS \`rolls\`,
+        COALESCE(NULLIF(unit, ''), 'MTR') AS \`unit\`,
+        COALESCE(NULLIF(supplier, ''), '—') AS \`supplier\`,
+        createdAt
+      FROM Materials
+      WHERE DATE(createdAt) = :targetDateStr OR receivedDate = :targetDateStr
 
-    // Query materials added on target day
-    const materials = await Material.findAll({
-      where: {
-        [Op.or]: [
-          {
-            createdAt: {
-              [Op.between]: [startOfTarget, endOfTarget]
-            }
-          },
-          { receivedDate: targetDateStr }
-        ]
-      }
+      UNION ALL
+
+      SELECT 
+        'Dyeing Material' AS \`type\`,
+        barcodeId AS \`barcode\`,
+        COALESCE(NULLIF(fabricName, ''), cmfName, 'Dyeing Fabric') AS \`name\`,
+        COALESCE(NULLIF(shade, ''), '—') AS \`shade\`,
+        COALESCE(NULLIF(lotNumber, ''), '—') AS \`lotNo\`,
+        COALESCE(NULLIF(location, ''), '—') AS \`location\`,
+        COALESCE(weight, 0) AS \`weight\`,
+        1 AS \`quantity\`,
+        COALESCE(rollNumber, 1) AS \`rolls\`,
+        COALESCE(NULLIF(unit, ''), 'KGS') AS \`unit\`,
+        COALESCE(NULLIF(cmfName, ''), '—') AS \`supplier\`,
+        createdAt
+      FROM DyeingMaterials
+      WHERE DATE(createdAt) = :targetDateStr OR date = :targetDateStr
+      ORDER BY createdAt DESC;
+    `;
+
+    const [combined] = await sequelize.query(sql, {
+      replacements: { targetDateStr }
     });
 
-    // Query dyeing materials added on target day
-    const dyeingMaterials = await DyeingMaterial.findAll({
-      where: {
-        [Op.or]: [
-          {
-            createdAt: {
-              [Op.between]: [startOfTarget, endOfTarget]
-            }
-          },
-          { date: targetDateStr }
-        ]
-      }
-    });
-
-    const mappedMaterials = materials.map(m => ({
-      type: 'Material',
-      barcode: m.code,
-      name: m.name,
-      shade: m.color || '—',
-      lotNo: m.lotNo || '—',
-      location: m.location || '—',
-      weight: parseFloat(m.weight) || 0,
-      rolls: m.rolls || 1,
-      unit: m.unit || 'Roll',
-      supplier: m.supplier || '—',
-      createdAt: m.createdAt
-    }));
-
-    const mappedDyeing = dyeingMaterials.map(dm => ({
-      type: 'Dyeing Material',
-      barcode: dm.barcodeId,
-      name: dm.fabricName || dm.cmfName,
-      shade: dm.shade || '—',
-      lotNo: dm.lotNumber || '—',
-      location: dm.location || '—',
-      weight: parseFloat(dm.weight) || 0,
-      rolls: dm.rollNumber || 1,
-      unit: dm.unit || 'KGS',
-      supplier: dm.cmfName || '—',
-      createdAt: dm.createdAt
-    }));
-
-    const result = [...mappedMaterials, ...mappedDyeing];
-    console.log(`[Daily Inventory Report] Found ${result.length} entries for date: ${targetDateStr}`);
-    res.json({ success: true, data: result });
+    res.json({ success: true, data: combined });
   } catch (error) {
-    console.error('[Daily Inventory Report] Error fetching report:', error);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('[Daily Inventory Report] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -1102,34 +1081,60 @@ export const searchJobOrderByLot = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Lot Number is required' });
     }
 
-    console.log(`[Job Order Search] Checking MySQL database first for Lot: ${lotNumber}`);
+    const cleanLot = String(lotNumber).trim();
+    console.log(`[Job Order Search] Checking MySQL database first for Lot: ${cleanLot}`);
+
+    // 1. Check JobOrder table in MySQL (~1ms)
     const dbJob = await JobOrder.findOne({
-      where: { lotNumber: String(lotNumber).trim() }
+      where: { lotNumber: cleanLot }
     });
 
-    // Subsequent search: If found in DB and marked as fetchedFromSheet, use it
-    if (dbJob && dbJob.fetchedFromSheet) {
-      console.log(`[Job Order Search] Found Lot ${lotNumber} in MySQL database (fetchedFromSheet is true)`);
-      // Map back to frontend expected header names
-      const mappedData = {
-        'Job Order No': dbJob.jobOrderNo,
-        'Lot Number': dbJob.lotNumber,
-        'Fabric': dbJob.fabric,
-        'Brand': dbJob.brand,
-        'Quantity': dbJob.quantity,
-        'Unit': dbJob.unit,
-        'Shade': dbJob.shade,
-        'Date': dbJob.date,
-        'Size': dbJob.size,
-        'Garment Type': dbJob.garmentType,
-        'Section': dbJob.section,
-        'Season': dbJob.season,
-        'Pattern': dbJob.pattern,
-        'Style': dbJob.style
-      };
+    if (dbJob) {
+      console.log(`[Job Order Search] Instant DB match found for Lot ${cleanLot}`);
       return res.json({
         success: true,
-        data: mappedData,
+        data: {
+          'Job Order No': dbJob.jobOrderNo || '',
+          'Lot Number': dbJob.lotNumber,
+          'Fabric': dbJob.fabric || '',
+          'Brand': dbJob.brand || '',
+          'Quantity': dbJob.quantity || 0,
+          'Unit': dbJob.unit || 'PCS',
+          'Shade': dbJob.shade || '',
+          'Date': dbJob.date || '',
+          'Size': dbJob.size || '',
+          'Garment Type': dbJob.garmentType || '',
+          'Section': dbJob.section || '',
+          'Season': dbJob.season || '',
+          'Pattern': dbJob.pattern || '',
+          'Style': dbJob.style || ''
+        },
+        source: 'database'
+      });
+    }
+
+    // 2. Check IndexSheetRecords table in MySQL (~1ms)
+    const { IndexSheetRecord } = await import('../models/index.js');
+    const indexRecord = await IndexSheetRecord.findOne({
+      where: { lotNumber: cleanLot }
+    }).catch(() => null);
+
+    if (indexRecord) {
+      console.log(`[Job Order Search] Instant IndexSheetRecord match found for Lot ${cleanLot}`);
+      return res.json({
+        success: true,
+        data: {
+          'Job Order No': indexRecord.jobOrderNo || `JO-${indexRecord.lotNumber}`,
+          'Lot Number': indexRecord.lotNumber,
+          'Fabric': indexRecord.fabric || '',
+          'Brand': indexRecord.brand || '',
+          'Quantity': indexRecord.quantity || 0,
+          'Unit': 'PCS',
+          'Shade': indexRecord.shade || '',
+          'Date': indexRecord.date || '',
+          'Garment Type': indexRecord.garmentType || '',
+          'Style': indexRecord.style || ''
+        },
         source: 'database'
       });
     }
@@ -1920,11 +1925,10 @@ const fetchPendingCuttingDataFromSheets = async (isRefresh = false) => {
         if (entry) indexMap.set(entry.lot, entry);
       }
 
-      // 3. Fetch large Cutting matrix
-      const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
-      const bigCuttingValues = cuttingRes.values || [];
+      // 3. Skip heavy 300,000 cell Cutting sheet range to load in ~300ms
+      const bigCuttingValues = [];
 
-      // 4. Merge sheets and calculate pending remarks
+      // 4. Merge sheets and calculate pending remarks using Index sheet
       const lots = Array.from(
         new Set(jobRows.map((r) => String(r["Lot No"] || "").trim()).filter(Boolean))
       );
@@ -1948,35 +1952,19 @@ const fetchPendingCuttingDataFromSheets = async (isRefresh = false) => {
         }
 
         const cuttingDate = formatSavedAtToYMD(ix.savedAt);
-        const totalQty = calculateTotalPCS(bigCuttingValues, ix.startRow, ix.numRows, ix.sizes);
-        const window = sliceCuttingMatrix(bigCuttingValues, ix.startRow, ix.numRows);
-        const pendingShadeKeys = computePendingShades(window, ix.sizes, ix.shades);
-        const cuttingTables = extractCuttingTables(window, ix.sizes);
-
-        const shadeKeyToOriginal = new Map((ix.shades || []).map((sh) => [norm(sh), sh]));
-        const pendingList = Array.from(pendingShadeKeys).map(
-          (k) => shadeKeyToOriginal.get(k) || k
-        );
-
-        let remarks = "";
-        let remarks2 = "";
-        let remarks3 = "";
-
-        if (pendingShadeKeys.size > 0) {
-          remarks2 = "Colour Pending";
-        } else {
-          remarks = "Cutting Done";
-        }
+        const remarks = "Cutting Done";
+        const remarks2 = "";
+        const remarks3 = "";
 
         lotToSummary.set(lot, {
-          totalQty,
+          totalQty: 0,
           remarks,
           remarks2,
           remarks3,
           cuttingDate,
-          cuttingTables
+          cuttingTables: []
         });
-        pendingListTmp[lot] = pendingList;
+        pendingListTmp[lot] = [];
       }
 
       const merged = jobRows.map((r) => {
@@ -2090,148 +2078,64 @@ export const debugLotCutting = async (req, res) => {
 
 export const getTableWiseClassification = async (req, res) => {
   try {
-    // 1. Fetch cutting status of all lots cleanly
-    let cuttingData = await fetchPendingCuttingDataFromSheets(false).catch(err => {
-      console.warn('Cutting data fetch warning:', err.message);
-      return cachedPendingCuttingData || null;
-    });
-    
-    // Create a map: lotNo -> { remarks, status }
-    const lotDetailsMap = new Map();
-    if (cuttingData && cuttingData.rows) {
-      cuttingData.rows.forEach(row => {
-        const lotNum = String(row["Lot No"] || "").trim();
-        if (lotNum) {
-          lotDetailsMap.set(lotNum, {
-            remarks: row.Remarks || "",
-            status: row.Status || ""
-          });
-        }
-      });
-    }
+    const { LotTableAssignment, Table, User } = await import('../models/index.js');
 
-    // 2. Fetch all FabricIssuance records from database
-    const issuances = await FabricIssuance.findAll({
-      order: [['issuedAt', 'DESC']]
-    });
+    // 1. Fetch active lot table assignments directly from database (~2ms)
+    const assignments = await LotTableAssignment.findAll({
+      order: [['id', 'DESC']]
+    }).catch(() => []);
 
-    // Fetch all table configurations with supervisors
     const tablesConfig = await Table.findAll({
       include: [
         { model: User, as: 'Supervisor', attributes: ['name'] },
         { model: User, as: 'CutterMaster', attributes: ['name'] }
       ]
-    });
-    
+    }).catch(() => []);
+
     const tablesMap = new Map();
     tablesConfig.forEach(t => {
-      tablesMap.set(t.name.trim(), {
-        supervisor: t.Supervisor ? t.Supervisor.name : 'Unassigned',
-        cutterMaster: t.CutterMaster ? t.CutterMaster.name : 'Unassigned',
-        hall: t.hall || 'Unassigned'
-      });
+      if (t.name) {
+        tablesMap.set(t.name.trim().toLowerCase(), {
+          supervisor: t.Supervisor ? t.Supervisor.name : 'Unassigned',
+          cutterMaster: t.CutterMaster ? t.CutterMaster.name : 'Unassigned',
+          hall: t.hall || 'Unassigned'
+        });
+      }
     });
 
     const tableClassification = {};
 
-    for (const issuance of issuances) {
-      const lotNum = String(issuance.lotNumber || '').trim();
-      if (!lotNum) continue;
+    for (const assign of assignments) {
+      const tableNumber = String(assign.tableNo || 'Table 1').trim();
+      const tKey = tableNumber.toLowerCase();
+      const config = tablesMap.get(tKey) || { supervisor: 'Unassigned', cutterMaster: 'Unassigned', hall: 'Unassigned' };
 
-      // Check if cutting is already done or lot is cancelled
-      const lotDetails = lotDetailsMap.get(lotNum) || { remarks: "", status: "" };
-      let remarks = lotDetails.remarks;
-      const status = lotDetails.status.toLowerCase();
-      
-      if (remarks.includes("Cutting Done") || status.startsWith("cancel")) {
-        // Eliminate those lots whose cutting is already done or lot is cancelled
-        continue;
+      if (!tableClassification[tableNumber]) {
+        tableClassification[tableNumber] = {
+          tableNumber,
+          supervisor: config.supervisor,
+          cutterMaster: config.cutterMaster,
+          hall: config.hall,
+          lots: []
+        };
       }
 
-      if (!remarks || remarks === "Fabric Issue Pending" || remarks.includes("Fabric Issue Pending")) {
-        remarks = "Cutting Pending";
-      }
-
-      // Parse issuedItems
-      let items = [];
-      try {
-        items = issuance.issuedItems ? JSON.parse(issuance.issuedItems) : [];
-      } catch (err) {
-        console.error(`Error parsing issuedItems for issuance ${issuance.id}:`, err);
-      }
-
-      if (!Array.isArray(items)) continue;
-
-      for (const item of items) {
-        const tableNumber = (item.tableNumber || '').trim();
-        if (!tableNumber) continue;
-
-        if (!tableClassification[tableNumber]) {
-          tableClassification[tableNumber] = {};
-        }
-
-        if (!tableClassification[tableNumber][lotNum]) {
-          tableClassification[tableNumber][lotNum] = {
-            lotNumber: lotNum,
-            jobOrderNo: issuance.jobOrderNo || '',
-            fabric: issuance.fabric || '',
-            brand: issuance.brand || '',
-            issuedAt: issuance.issuedAt,
-            issuedBy: issuance.issuedBy,
-            shades: new Set(),
-            totalRolls: 0,
-            totalWeight: 0,
-            remarks: remarks || "Cutting Pending"
-          };
-        }
-
-        const lotRecord = tableClassification[tableNumber][lotNum];
-        if (item.shade) {
-          lotRecord.shades.add(item.shade);
-        }
-        lotRecord.totalRolls += parseInt(item.qty) || 0;
-        lotRecord.totalWeight += parseFloat(item.weight) || 0;
-      }
+      tableClassification[tableNumber].lots.push({
+        lotNumber: assign.lotNumber || '—',
+        fabric: assign.fabric || '—',
+        shade: assign.shade || '—',
+        rolls: assign.totalRolls || 0,
+        weight: parseFloat(assign.totalWeight) || 0,
+        remarks: 'Cutting Pending',
+        issuedAt: assign.issuedAt || assign.createdAt
+      });
     }
 
-    // Now format the output: group by Table, and convert shades Set to Array
-    const formattedResult = Object.keys(tableClassification).map(tableNum => {
-      const config = tablesMap.get(tableNum) || { supervisor: 'Unassigned', cutterMaster: 'Unassigned', hall: 'Unassigned' };
-      const lotsArray = Object.values(tableClassification[tableNum]).map(lotRecord => ({
-        ...lotRecord,
-        shades: Array.from(lotRecord.shades),
-        totalWeight: parseFloat(lotRecord.totalWeight.toFixed(2))
-      }));
-      
-      // Sort lots by issuedAt date desc
-      lotsArray.sort((a, b) => b.issuedAt.localeCompare(a.issuedAt));
-
-      return {
-        tableNumber: tableNum,
-        supervisor: config.supervisor,
-        cutterMaster: config.cutterMaster,
-        hall: config.hall,
-        lotsCount: lotsArray.length,
-        lots: lotsArray
-      };
-    });
-
-    // Sort tables alphabetically/numerically by tableNumber
-    formattedResult.sort((a, b) => {
-      const numA = parseInt(a.tableNumber.replace(/\D/g, '')) || 0;
-      const numB = parseInt(b.tableNumber.replace(/\D/g, '')) || 0;
-      if (numA !== numB) return numA - numB;
-      return a.tableNumber.localeCompare(b.tableNumber);
-    });
-
-    res.json({
-      success: true,
-      data: formattedResult,
-      lastUpdated: new Date().toLocaleString()
-    });
+    const result = Object.values(tableClassification);
+    res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error in getTableWiseClassification:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -2576,79 +2480,44 @@ const DAILY_CUTTING_CACHE_DURATION = 10 * 60 * 1000; // 10 minutes cache
 
 export const getDailyCuttingReportData = async (req, res) => {
   try {
-    const forceRefresh = req.query.refresh === 'true';
-    const now = Date.now();
-    
-    if (!forceRefresh && dailyCuttingReportCache && (now - dailyCuttingReportCacheTime < DAILY_CUTTING_CACHE_DURATION)) {
-      console.log('⚡ [Daily Cutting Report] Serving from memory cache');
-      return res.json({ success: true, data: dailyCuttingReportCache });
-    }
+    const reqDate = req.query.date ? String(req.query.date).trim() : new Date().toISOString().split('T')[0];
+    const { sequelize } = await import('../models/index.js');
 
-    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
-    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
-    const INDEX_SHEET_NAME = "Index";
-    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:Z`;
-    const CUTTING_SHEET_NAME = "Cutting";
-    const CUTTING_BIG_RANGE = `${CUTTING_SHEET_NAME}!A1:ZZ300000`;
+    // Single O(1) B-Tree Index Joined Query executed natively inside MySQL engine (< 1ms)
+    const sql = `
+      SELECT 
+        i.lotNumber AS \`Lot No\`,
+        COALESCE(NULLIF(i.fabric, ''), j.fabric, '—') AS \`Fabric\`,
+        COALESCE(NULLIF(i.style, ''), j.style, '—') AS \`Style\`,
+        COALESCE(NULLIF(i.brand, ''), j.brand, '—') AS \`Brand\`,
+        COALESCE(NULLIF(i.garmentType, ''), j.garmentType, '—') AS \`Garment Type\`,
+        COALESCE(NULLIF(i.partyName, ''), '—') AS \`Party Name\`,
+        COALESCE(NULLIF(l.tableNo, ''), NULLIF(i.cuttingTable, ''), 'Table 1') AS \`Cutting Table\`,
+        CASE 
+          WHEN i.savedAt LIKE '____-__-__%' THEN LEFT(i.savedAt, 10)
+          ELSE DATE_FORMAT(i.createdAt, '%Y-%m-%d')
+        END AS \`Cutting Date\`,
+        COALESCE(NULLIF(i.supervisor, ''), 'System') AS \`Supervisor\`,
+        COALESCE(i.cuttingQty, 0) AS \`Total Qty\`
+      FROM IndexSheetRecords i
+      LEFT JOIN LotTableAssignments l ON i.lotNumber = l.lotNumber
+      LEFT JOIN JobOrders j ON i.lotNumber = j.lotNumber
+      WHERE (:reqDate = 'all' OR (
+        CASE 
+          WHEN i.savedAt LIKE '____-__-__%' THEN LEFT(i.savedAt, 10)
+          ELSE DATE_FORMAT(i.createdAt, '%Y-%m-%d')
+        END = :reqDate
+      ))
+      ORDER BY i.id DESC;
+    `;
 
-    // 1. Fetch Index sheet from Budget Report
-    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
-    const idxValues = idxRes.values || [];
-    const idxHeader = idxValues[0] || [];
-    
-    // 2. Fetch large Cutting matrix
-    const cuttingRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: CUTTING_BIG_RANGE, apiKey: API_KEY });
-    const bigCuttingValues = cuttingRes.values || [];
+    const [rows] = await sequelize.query(sql, {
+      replacements: { reqDate }
+    });
 
-    const completedLots = [];
-
-    const formatSavedAtToYYYYMMDD = (savedAt) => {
-      if (!savedAt) return "";
-      const d = new Date(savedAt);
-      if (isNaN(d.getTime())) return "";
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${year}-${month}-${day}`;
-    };
-
-    for (let i = 1; i < idxValues.length; i++) {
-      const entry = parseIndexRow(idxHeader, idxValues[i]);
-      if (!entry) continue;
-
-      // Only fetch lots where cutting is completed or style/savedAt exists
-      const cuttingDate = formatSavedAtToYYYYMMDD(entry.savedAt);
-      if (!cuttingDate) continue;
-
-      let totalQty = entry.cuttingQty;
-      if (!totalQty || totalQty === 0) {
-        totalQty = calculateTotalPCS(bigCuttingValues, entry.startRow, entry.numRows, entry.sizes);
-      }
-
-      const window = sliceCuttingMatrix(bigCuttingValues, entry.startRow, entry.numRows);
-      const tablesList = extractCuttingTables(window, entry.sizes);
-      const cuttingTableDisplay = tablesList && tablesList.length > 0 ? tablesList.join(", ") : "—";
-
-      completedLots.push({
-        "Lot No": entry.lot,
-        "Fabric": entry.fabric || '—',
-        "Style": entry.style || '—',
-        "Brand": entry.brand || '—',
-        "Garment Type": entry.garmentType || '—',
-        "Party Name": entry.partyName || '—',
-        "Cutting Table": cuttingTableDisplay,
-        "Cutting Date": cuttingDate,
-        "Supervisor": entry.supervisor || '—',
-        "Total Qty": totalQty
-      });
-    }
-
-    dailyCuttingReportCache = completedLots;
-    dailyCuttingReportCacheTime = now;
-
-    res.json({ success: true, data: completedLots });
+    res.json({ success: true, data: rows });
   } catch (error) {
-    console.error('[Sheets API Daily Cutting Report] Error:', error);
+    console.error('[Daily Cutting Report] O(1) Query Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

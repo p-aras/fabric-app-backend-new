@@ -107,3 +107,28 @@ export const getApprovalStatus = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+export const consumeApprovalRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tableNo, lotNumber } = req.body || {};
+
+    if (id && id !== 'undefined' && id !== 'null') {
+      const appReq = await ApprovalRequest.findByPk(id);
+      if (appReq) {
+        await appReq.update({ status: 'Used' });
+        return res.json({ success: true, data: appReq });
+      }
+    }
+
+    if (tableNo) {
+      const whereCond = { tableNo, status: 'Approved' };
+      if (lotNumber) whereCond.lotNumber = lotNumber;
+      await ApprovalRequest.update({ status: 'Used' }, { where: whereCond });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};

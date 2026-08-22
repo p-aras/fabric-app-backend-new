@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import app from './app.js';
 import sequelize, { getActiveDialect } from './config/db.js';
 import { seedDatabase } from './config/seed.js';
+import { fetchPendingCuttingDataFromSheets } from './controllers/sheetsController.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -32,8 +33,7 @@ const ensureDatabaseExists = async () => {
     await connection.end();
     console.log('Database ensured/created successfully');
   } catch (err) {
-    console.error('Failed to ensure/create database:', err);
-    throw err; // re‑throw to stop server start
+    console.warn('Info: Database existence check skipped or handled by cloud provider:', err.message);
   }
 };
 
@@ -151,6 +151,89 @@ const startServer = async () => {
     // Sync models (creates MySQL tables if they do not exist)
     await sequelize.sync();
     console.log('Database tables synchronized.');
+
+    // Ensure LotTableAssignments table exists in Aiven MySQL explicitly (both case variants for Linux MySQL compatibility)
+    try {
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS \`LotTableAssignments\` (
+          \`id\` INTEGER NOT NULL AUTO_INCREMENT,
+          \`lotNumber\` VARCHAR(50) NOT NULL,
+          \`tableNo\` VARCHAR(50) NOT NULL,
+          \`jobOrderNo\` VARCHAR(50) NULL,
+          \`fabric\` VARCHAR(100) NULL,
+          \`shade\` VARCHAR(100) NULL,
+          \`totalRolls\` INTEGER DEFAULT 0,
+          \`totalWeight\` DECIMAL(10,2) DEFAULT 0.00,
+          \`status\` VARCHAR(30) DEFAULT 'Cutting Pending',
+          \`issuedBy\` VARCHAR(100) NULL,
+          \`issuedAt\` VARCHAR(50) NULL,
+          \`completedAt\` VARCHAR(50) NULL,
+          \`createdAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`updatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      `);
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS \`lottableassignments\` (
+          \`id\` INTEGER NOT NULL AUTO_INCREMENT,
+          \`lotNumber\` VARCHAR(50) NOT NULL,
+          \`tableNo\` VARCHAR(50) NOT NULL,
+          \`jobOrderNo\` VARCHAR(50) NULL,
+          \`fabric\` VARCHAR(100) NULL,
+          \`shade\` VARCHAR(100) NULL,
+          \`totalRolls\` INTEGER DEFAULT 0,
+          \`totalWeight\` DECIMAL(10,2) DEFAULT 0.00,
+          \`status\` VARCHAR(30) DEFAULT 'Cutting Pending',
+          \`issuedBy\` VARCHAR(100) NULL,
+          \`issuedAt\` VARCHAR(50) NULL,
+          \`completedAt\` VARCHAR(50) NULL,
+          \`createdAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`updatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      `);
+      console.log('✅ Guaranteed LotTableAssignments table created in Aiven MySQL database.');
+    } catch (createErr) {
+      console.warn('Info: CREATE TABLE LotTableAssignments notice:', createErr.message);
+    }
+
+    // Auto-backfill past FabricIssuance records into LotTableAssignments if empty
+    try {
+      const { LotTableAssignment, FabricIssuance } = await import('./models/index.js');
+      const count = await LotTableAssignment.count().catch(() => 0);
+      if (count === 0) {
+        console.log('📦 Backfilling existing FabricIssuance records into LotTableAssignments table in MySQL...');
+        const issuances = await FabricIssuance.findAll();
+        for (const fsItem of issuances) {
+          let items = [];
+          try {
+            items = fsItem.issuedItems ? JSON.parse(fsItem.issuedItems) : [];
+          } catch (e) {}
+
+          if (Array.isArray(items) && items.length > 0) {
+            for (const it of items) {
+              if (it.tableNumber) {
+                await LotTableAssignment.create({
+                  lotNumber: String(fsItem.lotNumber),
+                  tableNo: String(it.tableNumber),
+                  jobOrderNo: String(fsItem.jobOrderNo || ''),
+                  fabric: String(fsItem.fabric || ''),
+                  shade: String(it.shade || ''),
+                  totalRolls: parseInt(it.qty) || 0,
+                  totalWeight: parseFloat(it.weight) || 0,
+                  status: 'Cutting Pending',
+                  issuedBy: String(fsItem.issuedBy || 'System'),
+                  issuedAt: String(fsItem.issuedAt || new Date().toISOString())
+                }).catch(() => {});
+              }
+            }
+          }
+        }
+        console.log('✅ Backfill to LotTableAssignments table complete.');
+      }
+    } catch (bfErr) {
+      console.warn('LotTableAssignments backfill notice:', bfErr.message);
+    }
 
     // Ensure lotNo column exists on Materials table
     try {
@@ -301,33 +384,9 @@ const startServer = async () => {
     // Seed defaults if database tables are empty
     await seedDatabase();
 
-    try {
-      const { Material: TestMaterial, DyeingMaterial: TestDyeingMaterial } = await import('./models/index.js');
-      const { Op: TestOp } = await import('sequelize');
-      const testMatList = await TestMaterial.findAll({
-        where: { code: { [TestOp.like]: '9%' } }
-      });
-      const testDyeList = await TestDyeingMaterial.findAll({
-        where: { barcodeId: { [TestOp.like]: '9%' } }
-      });
-      let logMsg = `MATERIALS starting with 9:\n`;
-      testMatList.forEach(m => {
-        logMsg += `- Code: ${m.code}, Name: ${m.name}, Lot: ${m.lotNo}, Location: ${m.location}\n`;
-      });
-      logMsg += `\nDYEING MATERIALS starting with 9:\n`;
-      testDyeList.forEach(d => {
-        logMsg += `- Barcode: ${d.barcodeId}, Lot: ${d.lotNumber}\n`;
-      });
-      fs.writeFileSync(path.join(__dirname, '../diagnostic_db_error.log'), logMsg);
-      console.log('✅ Diagnostic DB 9-series scan complete');
-    } catch (err) {
-      fs.writeFileSync(path.join(__dirname, '../diagnostic_db_error.log'), `ERROR:\nName: ${err.name}\nMessage: ${err.message}\nStack:\n${err.stack}`);
-      console.error('❌ Diagnostic DB test fail: ', err.message);
-    }
-
     // Start Express listener
     app.listen(PORT, () => {
-      console.log(`TWMS Backend Server running on http://localhost:${PORT}`);
+      console.log(`🚀 TWMS Backend Server running on http://localhost:${PORT}`);
     });
   } catch (error) {
     console.error('Failed to launch TWMS backend server:', error);

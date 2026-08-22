@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --max-old-space-size=460 src/server.js",
     "dev": "nodemon src/server.js",
     "db:sync": "node scripts/syncDatabase.js",
     "db:import": "node scripts/import_inventory.js",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

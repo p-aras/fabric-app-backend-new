@@ -190,6 +190,13 @@ export const DyeingMaterial = sequelize.define('DyeingMaterial', {
   timestamp: { type: DataTypes.STRING },
   status: { type: DataTypes.STRING(20), defaultValue: 'in_stock' },
   unit: { type: DataTypes.STRING, defaultValue: 'KGS' }
+}, {
+  indexes: [
+    { fields: ['barcodeId'], unique: true },
+    { fields: ['lotNumber'] },
+    { fields: ['status'] },
+    { fields: ['status', 'lotNumber'] }
+  ]
 });
 
 // --- FABRIC ISSUANCE MODEL ---
@@ -213,6 +220,13 @@ export const FabricIssuance = sequelize.define('FabricIssuance', {
   kharchaItems: { type: DataTypes.TEXT },
   matchingStatus: { type: DataTypes.STRING(50) },
   matchingPassedBy: { type: DataTypes.STRING(100) }
+}, {
+  indexes: [
+    { fields: ['issuanceId'], unique: true },
+    { fields: ['lotNumber'] },
+    { fields: ['issuedAt'] },
+    { fields: ['lotNumber', 'issuedAt'] }
+  ]
 });
 
 // --- FABRIC RETURN MODEL ---
@@ -416,9 +430,131 @@ export const ApprovalRequest = sequelize.define('ApprovalRequest', {
   requestedBy: { type: DataTypes.STRING(100), allowNull: false },
   reason: { type: DataTypes.TEXT },
   requestedWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
-  status: { type: DataTypes.STRING(20), defaultValue: 'Pending' }, // Pending, Approved, Rejected
+  status: { type: DataTypes.STRING(20), defaultValue: 'Pending' }, // Pending, Approved, Rejected, Used
   respondedBy: { type: DataTypes.STRING(100) },
   respondedAt: { type: DataTypes.DATE }
+}, {
+  indexes: [
+    { fields: ['tableNo', 'status'] },
+    { fields: ['lotNumber'] }
+  ]
+});
+
+// --- LOT TABLE ASSIGNMENT MODEL ---
+export const LotTableAssignment = sequelize.define('LotTableAssignment', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  tableNo: { type: DataTypes.STRING(50), allowNull: false },
+  jobOrderNo: { type: DataTypes.STRING(50) },
+  fabric: { type: DataTypes.STRING(100) },
+  shade: { type: DataTypes.STRING(100) },
+  totalRolls: { type: DataTypes.INTEGER, defaultValue: 0 },
+  totalWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  status: { type: DataTypes.STRING(30), defaultValue: 'Cutting Pending' }, // 'Cutting Pending', 'Cutting Done', 'Cancelled'
+  issuedBy: { type: DataTypes.STRING(100) },
+  issuedAt: { type: DataTypes.STRING(50) },
+  completedAt: { type: DataTypes.STRING(50) }
+}, {
+  tableName: 'LotTableAssignments',
+  indexes: [
+    { fields: ['tableNo', 'status'] },
+    { fields: ['lotNumber'] },
+    { fields: ['issuedAt'] }
+  ]
+});
+
+// --- ISSUED BARCODE MODEL ---
+export const IssuedBarcode = sequelize.define('IssuedBarcode', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  barcodeId: { type: DataTypes.STRING(50), allowNull: false, unique: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  issuanceId: { type: DataTypes.STRING(50) },
+  fabricName: { type: DataTypes.STRING(100) },
+  shade: { type: DataTypes.STRING(100) },
+  weight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  unit: { type: DataTypes.STRING(20), defaultValue: 'KGS' },
+  issuedBy: { type: DataTypes.STRING(100) },
+  department: { type: DataTypes.STRING(100) },
+  issuedAt: { type: DataTypes.STRING(50) }
+}, {
+  tableName: 'IssuedBarcodes',
+  indexes: [
+    { fields: ['barcodeId'], unique: true },
+    { fields: ['lotNumber'] },
+    { fields: ['issuedAt'] }
+  ]
+});
+// --- CUTTING SHEET RECORD MODEL ---
+export const CuttingSheetRecord = sequelize.define('CuttingSheetRecord', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  jobOrderNo: { type: DataTypes.STRING(50) },
+  partyName: { type: DataTypes.STRING(100) },
+  fabric: { type: DataTypes.STRING(100) },
+  shade: { type: DataTypes.STRING(100) },
+  billNumber: { type: DataTypes.STRING(50) },
+  opRolls: { type: DataTypes.INTEGER, defaultValue: 0 },
+  opWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  issueRolls: { type: DataTypes.INTEGER, defaultValue: 0 },
+  issueWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  balanceRolls: { type: DataTypes.INTEGER, defaultValue: 0 },
+  balanceWeight: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0.00 },
+  cuttingTable: { type: DataTypes.STRING(50) },
+  savedAt: { type: DataTypes.STRING(50) },
+  rawJson: { type: DataTypes.TEXT }
+}, {
+  tableName: 'CuttingSheetRecords',
+  indexes: [
+    { fields: ['lotNumber'] },
+    { fields: ['cuttingTable'] },
+    { fields: ['savedAt'] }
+  ]
+});
+
+// --- INDEX SHEET RECORD MODEL ---
+export const IndexSheetRecord = sequelize.define('IndexSheetRecord', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false, unique: true },
+  jobOrderNo: { type: DataTypes.STRING(50) },
+  partyName: { type: DataTypes.STRING(100) },
+  fabric: { type: DataTypes.STRING(100) },
+  style: { type: DataTypes.STRING(100) },
+  brand: { type: DataTypes.STRING(100) },
+  garmentType: { type: DataTypes.STRING(100) },
+  cuttingQty: { type: DataTypes.INTEGER, defaultValue: 0 },
+  cuttingTable: { type: DataTypes.STRING(50) },
+  supervisor: { type: DataTypes.STRING(100) },
+  savedAt: { type: DataTypes.STRING(50) },
+  rawJson: { type: DataTypes.TEXT }
+}, {
+  tableName: 'IndexSheetRecords',
+  indexes: [
+    { fields: ['lotNumber'], unique: true },
+    { fields: ['cuttingTable'] },
+    { fields: ['savedAt'] }
+  ]
+});
+
+// --- CUTTING MATRIX RECORD MODEL ---
+export const CuttingMatrixRecord = sequelize.define('CuttingMatrixRecord', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  cuttingTable: { type: DataTypes.STRING(50), defaultValue: 'Table 1' },
+  fabric: { type: DataTypes.STRING(100) },
+  style: { type: DataTypes.STRING(100) },
+  garmentType: { type: DataTypes.STRING(100) },
+  color: { type: DataTypes.STRING(100), allowNull: false },
+  sizeBreakdown: { type: DataTypes.TEXT },
+  totalPcs: { type: DataTypes.INTEGER, defaultValue: 0 },
+  rawRowJson: { type: DataTypes.TEXT }
+}, {
+  tableName: 'CuttingMatrixRecords',
+  indexes: [
+    { fields: ['lotNumber'] },
+    { fields: ['cuttingTable'] },
+    { fields: ['color'] },
+    { fields: ['lotNumber', 'cuttingTable'] }
+  ]
 });
 
 export { sequelize };
@@ -446,5 +582,10 @@ export default {
   FabricUnitConversionLog,
   Attendance,
   Staff,
-  ApprovalRequest
+  ApprovalRequest,
+  LotTableAssignment,
+  IssuedBarcode,
+  CuttingSheetRecord,
+  IndexSheetRecord,
+  CuttingMatrixRecord
 };

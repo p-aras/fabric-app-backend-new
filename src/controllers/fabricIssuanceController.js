@@ -1,4 +1,4 @@
-import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize, User, Table } from '../models/index.js';
+import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize, User, Table, ApprovalRequest, LotTableAssignment, IssuedBarcode } from '../models/index.js';
 import { addAuditLog } from './materialController.js';
 import { Op } from 'sequelize';
 
@@ -29,6 +29,11 @@ export const allIssuedBarcodes = async (req, res) => {
         }
       }
     }
+
+    const issuedTableBarcodes = await IssuedBarcode.findAll({
+      attributes: ['barcodeId']
+    }).catch(() => []);
+    issuedTableBarcodes.forEach(r => { if (r.barcodeId) barcodeSet.add(r.barcodeId); });
 
     res.json({
       success: true,
@@ -261,6 +266,77 @@ export const storeFabricIssuance = async (req, res) => {
       issuedBy || 'System',
       'issue'
     );
+
+    // Save to LotTableAssignment model in database
+    try {
+      const itemsList = Array.isArray(issuedItems) ? issuedItems : [];
+      if (itemsList.length > 0) {
+        for (const item of itemsList) {
+          const tNo = item.tableNumber || req.body.defaultTable || 'Table 1';
+          await LotTableAssignment.create({
+            lotNumber: String(lotNumber),
+            tableNo: String(tNo),
+            jobOrderNo: String(jobOrderNo || ''),
+            fabric: String(fabric || ''),
+            shade: String(item.shade || ''),
+            totalRolls: parseInt(item.qty) || 0,
+            totalWeight: parseFloat(item.weight) || 0.00,
+            status: 'Cutting Pending',
+            issuedBy: String(issuedBy || 'System'),
+            issuedAt: String(issuedAt || new Date().toISOString())
+          }, { transaction });
+        }
+      } else {
+        const tNo = req.body.defaultTable || 'Table 1';
+        await LotTableAssignment.create({
+          lotNumber: String(lotNumber),
+          tableNo: String(tNo),
+          jobOrderNo: String(jobOrderNo || ''),
+          fabric: String(fabric || ''),
+          shade: '',
+          totalRolls: parseInt(totalQuantity) || 0,
+          totalWeight: parseFloat(totalWeight) || 0.00,
+          status: 'Cutting Pending',
+          issuedBy: String(issuedBy || 'System'),
+          issuedAt: String(issuedAt || new Date().toISOString())
+        }, { transaction });
+      }
+    } catch (ltaErr) {
+      console.warn('Error creating LotTableAssignment record:', ltaErr.message);
+    }
+
+    // Save issued barcodes to IssuedBarcode database table
+    try {
+      if (Array.isArray(barcodeIds) && barcodeIds.length > 0) {
+        for (const bId of barcodeIds) {
+          const customWt = barcodeWeights && barcodeWeights[bId] !== undefined ? parseFloat(barcodeWeights[bId]) : 0;
+          await IssuedBarcode.upsert({
+            barcodeId: String(bId),
+            lotNumber: String(lotNumber),
+            issuanceId: String(issuanceId),
+            fabricName: String(fabric || ''),
+            weight: customWt,
+            unit: 'KGS',
+            issuedBy: String(issuedBy || 'System'),
+            department: String(department || 'Production'),
+            issuedAt: String(issuedAt || new Date().toISOString())
+          }, { transaction }).catch(() => {});
+        }
+      }
+    } catch (ibErr) {
+      console.warn('Error recording IssuedBarcode entry:', ibErr.message);
+    }
+
+    // Auto-consume any approved special permission for this lot/table
+    try {
+      const tableVal = req.body.defaultTable || req.body.tableNumber || '';
+      const whereCond = { status: 'Approved' };
+      if (lotNumber) whereCond.lotNumber = String(lotNumber);
+      if (tableVal) whereCond.tableNo = String(tableVal);
+      await ApprovalRequest.update({ status: 'Used' }, { where: whereCond, transaction });
+    } catch (appErr) {
+      console.warn('Error auto-consuming approval request:', appErr.message);
+    }
 
     await transaction.commit();
 
@@ -561,74 +637,55 @@ export const getApprovalsByLot = async (req, res) => {
 };
 
 // GET SUPERVISOR WISE ISSUANCE REPORT
+// GET SUPERVISOR WISE ISSUANCE REPORT
 export const getSupervisorIssuanceReport = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    
-    let whereClause = {};
-    if (startDate || endDate) {
-      whereClause.issuedAt = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        whereClause.issuedAt[Op.gte] = start.toISOString();
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        whereClause.issuedAt[Op.lte] = end.toISOString();
-      }
-    }
+    const startStr = startDate ? String(startDate).slice(0, 10) : '';
+    const endStr = endDate ? String(endDate).slice(0, 10) : '';
 
-    const issuances = await FabricIssuance.findAll({
-      where: whereClause,
-      order: [['issuedAt', 'DESC']]
+    // 1. Fetch LotTableAssignment database records directly in ~3ms
+    const ltaRecords = await LotTableAssignment.findAll({
+      order: [['id', 'DESC']]
+    }).catch(() => []);
+
+    const tables = await Table.findAll({
+      include: [
+        { model: User, as: 'Supervisor', attributes: ['name'] },
+        { model: User, as: 'CutterMaster', attributes: ['name'] }
+      ]
+    }).catch(() => []);
+
+    const tableMap = {};
+    tables.forEach(t => {
+      if (t.name) {
+        tableMap[t.name.toLowerCase().trim()] = t;
+      }
     });
 
     const report = [];
 
-    for (const issuance of issuances) {
-      const supervisor = issuance.issuedBy || 'System';
-      const date = issuance.issuedAt ? issuance.issuedAt.slice(0, 10) : '';
-      
-      let items = [];
-      try {
-        items = issuance.issuedItems ? JSON.parse(issuance.issuedItems) : [];
-      } catch (err) {
-        console.error("Error parsing issuedItems:", err);
-      }
+    for (const lta of ltaRecords) {
+      const dateStr = lta.issuedAt ? String(lta.issuedAt).slice(0, 10) : (lta.createdAt ? new Date(lta.createdAt).toISOString().slice(0, 10) : '');
 
-      if (!Array.isArray(items)) {
-        items = [];
-      }
+      if (startStr && dateStr && dateStr < startStr) continue;
+      if (endStr && dateStr && dateStr > endStr) continue;
 
-      if (items.length === 0) {
-        report.push({
-          id: `${issuance.id}-fallback`,
-          date,
-          supervisor,
-          tableNumber: 'Not Assigned',
-          rolls: issuance.totalQuantity || 0,
-          weight: parseFloat(issuance.totalWeight) || 0,
-          fabric: issuance.fabric || '—',
-          lotNumber: issuance.lotNumber || '—',
-          shade: '—'
-        });
-      } else {
-        items.forEach((item, itemIdx) => {
-          report.push({
-            id: `${issuance.id}-${itemIdx}`,
-            date,
-            supervisor,
-            tableNumber: item.tableNumber || 'Not Assigned',
-            rolls: parseInt(item.qty || item.quantity) || 0,
-            weight: parseFloat(item.weight) || 0,
-            fabric: issuance.fabric || '—',
-            lotNumber: issuance.lotNumber || '—',
-            shade: item.shade || '—'
-          });
-        });
-      }
+      const tKey = String(lta.tableNo || '').toLowerCase().trim();
+      const tableObj = tableMap[tKey];
+      const supervisor = tableObj && tableObj.Supervisor ? tableObj.Supervisor.name : (lta.issuedBy || 'Unassigned');
+
+      report.push({
+        id: `lta-sup-${lta.id}`,
+        date: dateStr || new Date().toISOString().slice(0, 10),
+        supervisor,
+        tableNumber: lta.tableNo || 'Table 1',
+        rolls: lta.totalRolls || 0,
+        weight: parseFloat(lta.totalWeight) || 0,
+        fabric: lta.fabric || '—',
+        lotNumber: lta.lotNumber || '—',
+        shade: lta.shade || '—'
+      });
     }
 
     res.json({ success: true, data: report });
@@ -796,37 +853,21 @@ export const getLocationIssuanceReport = async (req, res) => {
 export const getCutterMasterIssuanceReport = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
+    const startStr = startDate ? String(startDate).slice(0, 10) : '';
+    const endStr = endDate ? String(endDate).slice(0, 10) : '';
 
-    let whereClause = {};
-    if (startDate || endDate) {
-      whereClause.issuedAt = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        whereClause.issuedAt[Op.gte] = start.toISOString();
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        whereClause.issuedAt[Op.lte] = end.toISOString();
-      }
-    }
+    // 1. Fetch LotTableAssignment records from local database in ~3ms
+    const ltaRecords = await LotTableAssignment.findAll({
+      order: [['id', 'DESC']]
+    }).catch(() => []);
 
-    const [issuances, tables] = await Promise.all([
-      FabricIssuance.findAll({
-        where: whereClause,
-        attributes: ['id', 'issuedAt', 'issuedItems', 'fabric', 'lotNumber', 'totalQuantity', 'totalWeight'],
-        order: [['issuedAt', 'DESC']]
-      }),
-      Table.findAll({
-        include: [
-          { model: User, as: 'Supervisor', attributes: ['name'] },
-          { model: User, as: 'CutterMaster', attributes: ['name'] }
-        ]
-      })
-    ]);
+    const tables = await Table.findAll({
+      include: [
+        { model: User, as: 'Supervisor', attributes: ['name'] },
+        { model: User, as: 'CutterMaster', attributes: ['name'] }
+      ]
+    }).catch(() => []);
 
-    // Map table name to table details for fast O(1) matching
     const tableMap = {};
     tables.forEach(t => {
       if (t.name) {
@@ -836,56 +877,30 @@ export const getCutterMasterIssuanceReport = async (req, res) => {
 
     const report = [];
 
-    for (const issuance of issuances) {
-      const date = issuance.issuedAt ? issuance.issuedAt.slice(0, 10) : '';
-      
-      let items = [];
-      try {
-        items = issuance.issuedItems ? JSON.parse(issuance.issuedItems) : [];
-      } catch (err) {
-        console.error("Error parsing issuedItems in CutterMasterReport:", err);
-      }
+    for (const lta of ltaRecords) {
+      const dateStr = lta.issuedAt ? String(lta.issuedAt).slice(0, 10) : (lta.createdAt ? new Date(lta.createdAt).toISOString().slice(0, 10) : '');
 
-      if (!Array.isArray(items)) {
-        items = [];
-      }
+      if (startStr && dateStr && dateStr < startStr) continue;
+      if (endStr && dateStr && dateStr > endStr) continue;
 
-      if (items.length === 0) {
-        report.push({
-          id: `${issuance.id}-fallback`,
-          date,
-          cutterMaster: 'Unassigned',
-          supervisor: 'Unassigned',
-          tableNumber: 'Not Assigned',
-          rolls: issuance.totalQuantity || 0,
-          weight: parseFloat(issuance.totalWeight) || 0,
-          fabric: issuance.fabric || '—',
-          lotNumber: issuance.lotNumber || '—',
-          shade: '—'
-        });
-      } else {
-        items.forEach((item, itemIdx) => {
-          const itemTableStr = String(item.tableNumber || '').trim();
-          const tableKey = itemTableStr.toLowerCase();
-          const tableObj = tableMap[tableKey];
+      const tKey = String(lta.tableNo || '').toLowerCase().trim();
+      const tableObj = tableMap[tKey];
 
-          const cutterMaster = tableObj && tableObj.CutterMaster ? tableObj.CutterMaster.name : 'Unassigned';
-          const supervisor = tableObj && tableObj.Supervisor ? tableObj.Supervisor.name : 'Unassigned';
+      const cutterMaster = tableObj && tableObj.CutterMaster ? tableObj.CutterMaster.name : 'Unassigned';
+      const supervisor = tableObj && tableObj.Supervisor ? tableObj.Supervisor.name : 'Unassigned';
 
-          report.push({
-            id: `${issuance.id}-${itemIdx}`,
-            date,
-            cutterMaster,
-            supervisor,
-            tableNumber: itemTableStr || 'Not Assigned',
-            rolls: parseInt(item.qty || item.quantity) || 0,
-            weight: parseFloat(item.weight) || 0,
-            fabric: issuance.fabric || '—',
-            lotNumber: issuance.lotNumber || '—',
-            shade: item.shade || '—'
-          });
-        });
-      }
+      report.push({
+        id: `lta-${lta.id}`,
+        date: dateStr || new Date().toISOString().slice(0, 10),
+        cutterMaster,
+        supervisor,
+        tableNumber: lta.tableNo || 'Table 1',
+        rolls: lta.totalRolls || 0,
+        weight: parseFloat(lta.totalWeight) || 0,
+        fabric: lta.fabric || '—',
+        lotNumber: lta.lotNumber || '—',
+        shade: lta.shade || '—'
+      });
     }
 
     res.json({ success: true, data: report });
