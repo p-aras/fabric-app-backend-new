@@ -4,7 +4,6 @@ import dotenv from 'dotenv';
 import app from './app.js';
 import sequelize, { getActiveDialect } from './config/db.js';
 import { seedDatabase } from './config/seed.js';
-import { fetchPendingCuttingDataFromSheets } from './controllers/sheetsController.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
