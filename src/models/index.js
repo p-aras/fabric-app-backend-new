@@ -524,7 +524,7 @@ export const IndexSheetRecord = sequelize.define('IndexSheetRecord', {
   cuttingQty: { type: DataTypes.INTEGER, defaultValue: 0 },
   cuttingTable: { type: DataTypes.STRING(50) },
   supervisor: { type: DataTypes.STRING(100) },
-  savedAt: { type: DataTypes.STRING(50) },
+  savedAt: { type: DataTypes.STRING(100) },
   rawJson: { type: DataTypes.TEXT }
 }, {
   tableName: 'IndexSheetRecords',

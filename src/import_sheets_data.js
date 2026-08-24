@@ -5,7 +5,7 @@ dotenv.config();
 const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
 const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
 const INDEX_SHEET_NAME = "Index";
-const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:Z`;
+const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:AZ`;
 
 async function fetchSheet(range) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${BUDGET_SHEET_ID}/values/${encodeURIComponent(range)}?key=${API_KEY}`;
@@ -31,24 +31,50 @@ async function importSheetsData() {
     const idxValues = idxRes.values || [];
     console.log(`Downloaded ${idxValues.length} rows from Index sheet.`);
 
+    if (idxValues.length === 0) {
+      console.log('Index sheet is empty.');
+      await conn.end();
+      return;
+    }
+
+    // Dynamic header lookup
+    const rawHeaders = idxValues[0] || [];
+    const hmap = {};
+    rawHeaders.forEach((h, i) => {
+      const clean = String(h || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (clean) hmap[clean] = i;
+    });
+
+    const getCol = (row, ...aliases) => {
+      for (const a of aliases) {
+        const key = a.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (hmap[key] != null && hmap[key] < row.length) {
+          const val = String(row[hmap[key]] || '').trim();
+          if (val) return val;
+        }
+      }
+      return '';
+    };
+
     let importedIdx = 0;
 
-    for (let i = 0; i < idxValues.length; i++) {
+    for (let i = 1; i < idxValues.length; i++) {
       const row = idxValues[i];
       if (!row || row.length === 0) continue;
 
-      const lot = String(row[0] || '').trim();
+      const lot = getCol(row, 'lot number', 'lot no', 'lot') || String(row[0] || '').trim();
       // Skip if lot is empty or non-numeric header text like 'Lot'
       if (!lot || isNaN(Number(lot))) continue;
 
-      const fabric = String(row[4] || '—').trim();
-      const garmentType = String(row[5] || '—').trim();
-      const style = String(row[6] || '—').trim();
-      const supervisor = String(row[11] || '—').trim();
-      const partyName = String(row[13] || '—').trim();
-      const brand = String(row[14] || '—').trim();
-      const savedAt = String(row[23] || '').trim();
-      const cuttingQty = parseInt(String(row[25] || '0').replace(/,/g, '')) || 0;
+      const fabric = getCol(row, 'fabric', 'fabric description', 'fabric name') || String(row[4] || '—').trim();
+      const garmentType = getCol(row, 'garment type', 'garment') || String(row[5] || '—').trim();
+      const style = getCol(row, 'style') || String(row[6] || '—').trim();
+      const supervisor = getCol(row, 'supervisor', 'fabric supervisor') || String(row[11] || '—').trim();
+      const partyName = getCol(row, 'party name', 'party') || String(row[13] || '—').trim();
+      const brand = getCol(row, 'brand') || String(row[14] || '—').trim();
+      const savedAt = getCol(row, 'saved at', 'savedat', 'saved date', 'cutting date', 'date') || String(row[23] || '').trim();
+      const cuttingQtyStr = getCol(row, 'cutting qty', 'cuttingqty', 'qty', 'total qty', 'pcs') || String(row[25] || '0').trim();
+      const cuttingQty = parseInt(cuttingQtyStr.replace(/,/g, '')) || 0;
 
       try {
         await conn.query(`
@@ -71,7 +97,7 @@ async function importSheetsData() {
       }
     }
 
-    console.log(`🎉 Successfully imported ${importedIdx} valid index sheet records into IndexSheetRecords table!`);
+    console.log(`🎉 Successfully imported ${importedIdx} valid index sheet records with 'Saved at' column into IndexSheetRecords table!`);
     await conn.end();
     process.exit(0);
   } catch (err) {

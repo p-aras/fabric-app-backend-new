@@ -201,15 +201,42 @@ export const getMaterials = async (req, res) => {
       }
     }
 
-    // 11. Date Range
-    if (startDate || endDate) {
+    // 11. Safe Date Range parsing (supports YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY)
+    const parseSafeDate = (dStr) => {
+      if (!dStr || typeof dStr !== 'string') return null;
+      const clean = dStr.trim();
+      if (!clean || clean.toLowerCase() === 'undefined' || clean.toLowerCase() === 'null' || clean.toLowerCase() === 'invalid date') return null;
+      
+      const dmyMatch = clean.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+      if (dmyMatch) {
+        const [, day, month, year] = dmyMatch;
+        return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      }
+      
+      const ymdMatch = clean.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+      if (ymdMatch) {
+        const [, year, month, day] = ymdMatch;
+        return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+      }
+      
+      const d = new Date(clean);
+      if (!isNaN(d.getTime())) {
+        return d.toISOString().split('T')[0];
+      }
+      return null;
+    };
+
+    const validStartDate = parseSafeDate(startDate);
+    const validEndDate = parseSafeDate(endDate);
+
+    if (validStartDate || validEndDate) {
       const dateRangeCond = {};
-      if (startDate) dateRangeCond[Op.gte] = startDate;
-      if (endDate) dateRangeCond[Op.lte] = endDate;
+      if (validStartDate) dateRangeCond[Op.gte] = validStartDate;
+      if (validEndDate) dateRangeCond[Op.lte] = validEndDate;
 
       const createdDateCond = {};
-      if (startDate) createdDateCond[Op.gte] = new Date(startDate + 'T00:00:00');
-      if (endDate) createdDateCond[Op.lte] = new Date(endDate + 'T23:59:59.999');
+      if (validStartDate) createdDateCond[Op.gte] = new Date(`${validStartDate}T00:00:00.000Z`);
+      if (validEndDate) createdDateCond[Op.lte] = new Date(`${validEndDate}T23:59:59.999Z`);
 
       materialAndList.push({
         [Op.or]: [

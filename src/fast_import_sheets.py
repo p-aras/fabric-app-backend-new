@@ -160,5 +160,120 @@ def fast_import_cutting_matrix():
     cursor.close()
     conn.close()
 
+def fast_import_index_records():
+    print("[Python Fast Importer] Connecting to Aiven MySQL for Index Sheet...")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Ensure IndexSheetRecords table exists with proper indexes
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS `IndexSheetRecords` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `lotNumber` VARCHAR(50) NOT NULL UNIQUE,
+            `jobOrderNo` VARCHAR(50) NULL,
+            `partyName` VARCHAR(100) NULL,
+            `fabric` VARCHAR(100) NULL,
+            `style` VARCHAR(100) NULL,
+            `brand` VARCHAR(100) NULL,
+            `garmentType` VARCHAR(100) NULL,
+            `cuttingQty` INT DEFAULT 0,
+            `cuttingTable` VARCHAR(50) NULL,
+            `supervisor` VARCHAR(100) NULL,
+            `savedAt` VARCHAR(100) NULL,
+            `rawJson` TEXT NULL,
+            `createdAt` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updatedAt` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_isr_lot (`lotNumber`),
+            INDEX idx_isr_table (`cuttingTable`),
+            INDEX idx_isr_savedAt (`savedAt`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """)
+    conn.commit()
+
+    print("[Python Fast Importer] Fetching Index sheet from Google Sheets...")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{BUDGET_SHEET_ID}/values/Index!A:AZ?key={API_KEY}"
+    res = requests.get(url)
+    res.raise_for_status()
+    idx_values = res.json().get("values", [])
+    print(f"Downloaded {len(idx_values)} rows from Index sheet.")
+
+    if not idx_values:
+        print("Index sheet is empty.")
+        cursor.close()
+        conn.close()
+        return
+
+    raw_headers = idx_values[0] if len(idx_values) > 0 else []
+    hmap = {}
+    for i, h in enumerate(raw_headers):
+        clean = str(h or "").strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+        if clean:
+            hmap[clean] = i
+
+    def get_val(row, *aliases):
+        for a in aliases:
+            key = a.lower().replace(" ", "").replace("_", "").replace("-", "")
+            if key in hmap and hmap[key] < len(row):
+                val = str(row[hmap[key]] or "").strip()
+                if val:
+                    return val
+        return ""
+
+    insert_sql = """
+        REPLACE INTO IndexSheetRecords 
+        (lotNumber, partyName, fabric, style, brand, garmentType, cuttingQty, supervisor, savedAt, rawJson)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    batch_data = []
+    for i in range(1, len(idx_values)):
+        row = idx_values[i]
+        if not row:
+            continue
+
+        lot = get_val(row, "lotnumber", "lotno", "lot") or (str(row[0]).strip() if len(row) > 0 else "")
+        if not lot or not lot.replace("-", "").isdigit():
+            continue
+
+        fabric = get_val(row, "fabric", "fabricdescription", "fabricname") or (str(row[4]).strip() if len(row) > 4 else "—")
+        garment_type = get_val(row, "garmenttype", "garment") or (str(row[5]).strip() if len(row) > 5 else "—")
+        style = get_val(row, "style") or (str(row[6]).strip() if len(row) > 6 else "—")
+        supervisor = get_val(row, "supervisor", "fabricsupervisor") or (str(row[11]).strip() if len(row) > 11 else "—")
+        party_name = get_val(row, "partyname", "party") or (str(row[13]).strip() if len(row) > 13 else "—")
+        brand = get_val(row, "brand") or (str(row[14]).strip() if len(row) > 14 else "—")
+        saved_at = get_val(row, "savedat", "saveddate", "cuttingdate", "date") or (str(row[23]).strip() if len(row) > 23 else "")
+        
+        qty_str = get_val(row, "cuttingqty", "qty", "totalqty", "pcs") or (str(row[25]).strip() if len(row) > 25 else "0")
+        try:
+            cutting_qty = int(qty_str.replace(",", "").strip())
+        except Exception:
+            cutting_qty = 0
+
+        batch_data.append((
+            str(lot)[:50],
+            str(party_name)[:100],
+            str(fabric)[:100],
+            str(style)[:100],
+            str(brand)[:100],
+            str(garment_type)[:100],
+            cutting_qty,
+            str(supervisor)[:100],
+            str(saved_at)[:100],
+            json.dumps(row)
+        ))
+
+    print(f"[Python Fast Importer] Importing {len(batch_data)} IndexSheetRecords with 'Saved at' column...")
+    CHUNK_SIZE = 1000
+    for i in range(0, len(batch_data), CHUNK_SIZE):
+        chunk = batch_data[i:i + CHUNK_SIZE]
+        cursor.executemany(insert_sql, chunk)
+        conn.commit()
+
+    print(f"SUCCESS: {len(batch_data)} IndexSheetRecords imported with Saved at values.")
+    cursor.close()
+    conn.close()
+
 if __name__ == "__main__":
+    fast_import_index_records()
     fast_import_cutting_matrix()
+

@@ -1074,169 +1074,107 @@ export const getInventoryFilterValues = async (req, res) => {
   }
 };
 
-export const searchJobOrderByLot = async (req, res) => {
+let cachedJobOrdersMap = null;
+let lastJobOrdersFetchTime = 0;
+const JOB_ORDERS_CACHE_TTL = 3 * 60 * 1000; // 3 minutes in-memory cache
+
+async function getJobOrdersFromGoogleSheet(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedJobOrdersMap && (now - lastJobOrdersFetchTime < JOB_ORDERS_CACHE_TTL)) {
+    return cachedJobOrdersMap;
+  }
+
+  const map = new Map();
+  const JOB_SHEET_ID = "1fKSwGBIpzWEFk566WRQ4bzQ0anJlmasoY8TwrTLQHXI";
+  const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+  const JOB_RANGE = "JobOrder!A:AZ"; // Full columns including Column W (Lot Number)
+
   try {
-    const { lotNumber } = req.params;
-    if (!lotNumber) {
-      return res.status(400).json({ success: false, message: 'Lot Number is required' });
-    }
-
-    const cleanLot = String(lotNumber).trim();
-    console.log(`[Job Order Search] Checking MySQL database first for Lot: ${cleanLot}`);
-
-    // 1. Check JobOrder table in MySQL (~1ms)
-    const dbJob = await JobOrder.findOne({
-      where: { lotNumber: cleanLot }
-    });
-
-    if (dbJob) {
-      console.log(`[Job Order Search] Instant DB match found for Lot ${cleanLot}`);
-      return res.json({
-        success: true,
-        data: {
-          'Job Order No': dbJob.jobOrderNo || '',
-          'Lot Number': dbJob.lotNumber,
-          'Fabric': dbJob.fabric || '',
-          'Brand': dbJob.brand || '',
-          'Quantity': dbJob.quantity || 0,
-          'Unit': dbJob.unit || 'PCS',
-          'Shade': dbJob.shade || '',
-          'Date': dbJob.date || '',
-          'Size': dbJob.size || '',
-          'Garment Type': dbJob.garmentType || '',
-          'Section': dbJob.section || '',
-          'Season': dbJob.season || '',
-          'Pattern': dbJob.pattern || '',
-          'Style': dbJob.style || ''
-        },
-        source: 'database'
+    const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
+    const values = jobRes.values || [];
+    if (values.length > 0) {
+      const headers = values[0].map(h => String(h || '').trim());
+      const lotIndex = headers.findIndex(h => {
+        const nh = h.toLowerCase();
+        return nh === 'lot number' || nh === 'lot no' || nh === 'lot';
       });
+
+      for (let i = 1; i < values.length; i++) {
+        const cells = values[i];
+        const cellLot = lotIndex !== -1 && cells[lotIndex] != null ? String(cells[lotIndex]).trim() : '';
+        if (cellLot) {
+          const obj = {};
+          headers.forEach((header, idx) => {
+            if (header) obj[header] = cells[idx] != null ? String(cells[idx]).trim() : '';
+          });
+          if (!obj['Lot Number'] && obj['Lot No']) obj['Lot Number'] = obj['Lot No'];
+          if (!obj['Shade'] && obj['shade']) obj['Shade'] = obj['shade'];
+          if (!obj['Size'] && obj['size']) obj['Size'] = obj['size'];
+          map.set(cellLot.toLowerCase(), obj);
+        }
+      }
+      console.log(`[Job Order Search] Loaded ${map.size} job orders into in-memory cache from Google Sheets.`);
     }
-
-    // 2. Check IndexSheetRecords table in MySQL (~1ms)
-    const { IndexSheetRecord } = await import('../models/index.js');
-    const indexRecord = await IndexSheetRecord.findOne({
-      where: { lotNumber: cleanLot }
-    }).catch(() => null);
-
-    if (indexRecord) {
-      console.log(`[Job Order Search] Instant IndexSheetRecord match found for Lot ${cleanLot}`);
-      return res.json({
-        success: true,
-        data: {
-          'Job Order No': indexRecord.jobOrderNo || `JO-${indexRecord.lotNumber}`,
-          'Lot Number': indexRecord.lotNumber,
-          'Fabric': indexRecord.fabric || '',
-          'Brand': indexRecord.brand || '',
-          'Quantity': indexRecord.quantity || 0,
-          'Unit': 'PCS',
-          'Shade': indexRecord.shade || '',
-          'Date': indexRecord.date || '',
-          'Garment Type': indexRecord.garmentType || '',
-          'Style': indexRecord.style || ''
-        },
-        source: 'database'
-      });
-    }
-
-    // First time or not yet fetched: Fetch from cached/fresh Google Sheets
-    console.log(`[Job Order Search] Lot ${lotNumber} not yet fetched from sheet. Loading from Google Sheets...`);
-
-    const csvText = await getJobOrdersCsvText();
-    const rows = parseCsvTextIntoRows(csvText);
-
-    let foundRow = null;
-
-    if (rows.length > 0) {
-      const headers = rows[0];
-      const targetLot = String(lotNumber).trim().toLowerCase();
-
-      // Find the index of 'Lot Number' column
-      const lotIndex = headers.findIndex(h => h.trim().toLowerCase() === 'lot number');
-      if (lotIndex !== -1) {
-        for (let i = 1; i < rows.length; i++) {
-          const cells = rows[i];
-          if (cells.length > lotIndex) {
-            const cellLot = String(cells[lotIndex]).trim().toLowerCase();
-            if (cellLot === targetLot) {
-              let obj = {};
-              headers.forEach((header, index) => {
-                obj[header] = cells[index] || '';
+  } catch (sheetErr) {
+    console.warn('[Job Order Search] API fetch failed, trying CSV export fallback...', sheetErr.message);
+    try {
+      const csvText = await getJobOrdersCsvText();
+      const rows = parseCsvTextIntoRows(csvText);
+      if (rows.length > 0) {
+        const headers = rows[0].map(h => String(h || '').trim());
+        const lotIndex = headers.findIndex(h => {
+          const nh = h.toLowerCase();
+          return nh === 'lot number' || nh === 'lot no' || nh === 'lot';
+        });
+        if (lotIndex !== -1) {
+          for (let i = 1; i < rows.length; i++) {
+            const cells = rows[i];
+            const cellLot = String(cells[lotIndex] || '').trim();
+            if (cellLot) {
+              const obj = {};
+              headers.forEach((header, idx) => {
+                if (header) obj[header] = cells[idx] != null ? String(cells[idx]).trim() : '';
               });
-              foundRow = obj;
-              break;
+              if (!obj['Lot Number'] && obj['Lot No']) obj['Lot Number'] = obj['Lot No'];
+              map.set(cellLot.toLowerCase(), obj);
             }
           }
         }
       }
+    } catch (csvErr) {
+      console.error('[Job Order Search] CSV fallback also failed:', csvErr.message);
+    }
+  }
+
+  cachedJobOrdersMap = map;
+  lastJobOrdersFetchTime = Date.now();
+  return map;
+}
+
+export const searchJobOrderByLot = async (req, res) => {
+  try {
+    const { lotNumber } = req.params;
+    const isRefresh = req.query.refresh === 'true';
+    if (!lotNumber) {
+      return res.status(400).json({ success: false, message: 'Lot Number is required' });
     }
 
-    if (foundRow) {
-      console.log(`[Job Order Search] Found Lot ${lotNumber} in Google Sheets. Syncing to database with fetchedFromSheet=true...`);
-      try {
-        const lotNumberClean = String(foundRow['Lot Number'] || '').trim();
-        if (lotNumberClean) {
-          JobOrder.upsert({
-            jobOrderNo: foundRow['Job Order No'] || '',
-            lotNumber: lotNumberClean,
-            fabric: foundRow['Fabric'] || '',
-            brand: foundRow['Brand'] || '',
-            quantity: parseInt(foundRow['Quantity']) || 0,
-            unit: foundRow['Unit'] || '',
-            shade: foundRow['Shade'] || '',
-            date: foundRow['Date'] || '',
-            size: foundRow['Size'] || '',
-            garmentType: foundRow['Garment Type'] || '',
-            section: foundRow['Section'] || '',
-            season: foundRow['Season'] || '',
-            pattern: foundRow['Pattern'] || '',
-            style: foundRow['Style'] || '',
-            priority: foundRow['Priority'] || foundRow['priority'] || '',
-            fetchedFromSheet: true
-          }).then(() => {
-            console.log(`[Job Order Search] Automatically synced Lot ${lotNumberClean} (fetchedFromSheet=true) to SQL database`);
-          }).catch(upsertErr => {
-            console.error(`[Job Order Search] Failed to auto-sync Lot ${lotNumberClean} to SQL:`, upsertErr.message);
-          });
-        }
-      } catch (err) {
-        console.error(`[Job Order Search] Error preparing auto-sync:`, err.message);
-      }
+    const cleanLot = String(lotNumber).trim().toLowerCase();
+    console.log(`[Job Order Search] Fast searching for Lot: ${cleanLot} from Google Sheets...`);
 
+    const jobOrdersMap = await getJobOrdersFromGoogleSheet(isRefresh);
+    const foundRow = jobOrdersMap.get(cleanLot);
+
+    if (foundRow) {
+      console.log(`[Job Order Search] Instant match found for Lot ${cleanLot}. Shade: "${foundRow['Shade']}", Size: "${foundRow['Size']}".`);
       return res.json({
         success: true,
         data: foundRow,
-        source: 'sheets'
+        source: 'sheets_only'
       });
     }
 
-    // Fallback 1: If it existed in JobOrder database table (even if not marked fetchedFromSheet), return that
-    if (dbJob) {
-      console.log(`[Job Order Search] Lot ${lotNumber} not found on Google Sheet. Falling back to existing database record.`);
-      const mappedData = {
-        'Job Order No': dbJob.jobOrderNo,
-        'Lot Number': dbJob.lotNumber,
-        'Fabric': dbJob.fabric,
-        'Brand': dbJob.brand,
-        'Quantity': dbJob.quantity,
-        'Unit': dbJob.unit,
-        'Shade': dbJob.shade,
-        'Date': dbJob.date,
-        'Size': dbJob.size,
-        'Garment Type': dbJob.garmentType,
-        'Section': dbJob.section,
-        'Season': dbJob.season,
-        'Pattern': dbJob.pattern,
-        'Style': dbJob.style
-      };
-      return res.json({
-        success: true,
-        data: mappedData,
-        source: 'database_fallback'
-      });
-    }
-
-    // Fallback 2: Check Inventory database table
+    // Fallback 1: Check Inventory database table
     console.log(`[Job Order Search] Checking MySQL Inventory table for Lot: ${lotNumber}`);
     const inventoryRecords = await Inventory.findAll({
       where: { lot_no: String(lotNumber).trim() }
@@ -2076,15 +2014,49 @@ export const debugLotCutting = async (req, res) => {
   }
 };
 
+let cachedCutLotsSet = null;
+let lastCutLotsFetchTime = 0;
+const CUT_LOTS_CACHE_TTL = 60 * 1000; // 1 minute cache TTL for fast responsiveness
+
+async function getAllCutLotsFromIndexSheet() {
+  const now = Date.now();
+  if (cachedCutLotsSet && (now - lastCutLotsFetchTime < CUT_LOTS_CACHE_TTL)) {
+    return cachedCutLotsSet;
+  }
+
+  const cutLotSet = new Set();
+
+  try {
+    const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
+    const API_KEY = "AIzaSyAomDFBkOySlIxKWSKGHe6ATv9gvaBr7uk";
+    const INDEX_SHEET_NAME = "Index";
+    const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:A`;
+
+    const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
+    const idxValues = idxRes.values || [];
+    
+    for (let i = 0; i < idxValues.length; i++) {
+      const lot = String(idxValues[i]?.[0] || '').trim();
+      // Skip empty or generic header text
+      if (lot && lot.toLowerCase() !== 'lot' && lot.toLowerCase() !== 'lot no' && lot.toLowerCase() !== 'lot number') {
+        cutLotSet.add(lot.toLowerCase());
+      }
+    }
+    console.log(`[Table Verification] Loaded ${cutLotSet.size} cut lots directly from Google Sheets Index tab.`);
+  } catch (sheetErr) {
+    console.error('Google Sheets Index fetch error in getAllCutLotsFromIndexSheet:', sheetErr.message);
+  }
+
+  cachedCutLotsSet = cutLotSet;
+  lastCutLotsFetchTime = Date.now();
+  return cutLotSet;
+}
+
 export const getTableWiseClassification = async (req, res) => {
   try {
     const { LotTableAssignment, Table, User } = await import('../models/index.js');
 
-    // 1. Fetch active lot table assignments directly from database (~2ms)
-    const assignments = await LotTableAssignment.findAll({
-      order: [['id', 'DESC']]
-    }).catch(() => []);
-
+    // 1. Fetch tables config
     const tablesConfig = await Table.findAll({
       include: [
         { model: User, as: 'Supervisor', attributes: ['name'] },
@@ -2092,43 +2064,72 @@ export const getTableWiseClassification = async (req, res) => {
       ]
     }).catch(() => []);
 
-    const tablesMap = new Map();
+    const tableClassification = {};
+
+    // Initialize configured tables so vacant tables appear properly
     tablesConfig.forEach(t => {
       if (t.name) {
-        tablesMap.set(t.name.trim().toLowerCase(), {
+        const tName = t.name.trim();
+        tableClassification[tName] = {
+          tableNumber: tName,
           supervisor: t.Supervisor ? t.Supervisor.name : 'Unassigned',
           cutterMaster: t.CutterMaster ? t.CutterMaster.name : 'Unassigned',
-          hall: t.hall || 'Unassigned'
-        });
+          hall: t.hall || 'Unassigned',
+          lots: []
+        };
       }
     });
 
-    const tableClassification = {};
+    // 2. Fetch all cut lot numbers exclusively from Google Sheets Index tab
+    const cutLotSet = await getAllCutLotsFromIndexSheet();
+
+    // 3. Fetch lot table assignments directly from database (~2ms)
+    const assignments = await LotTableAssignment.findAll({
+      order: [['id', 'DESC']]
+    }).catch(() => []);
+
+    const tableLotsMap = new Map(); // key: `${tableNumber.toLowerCase()}__${normLot}`
 
     for (const assign of assignments) {
-      const tableNumber = String(assign.tableNo || 'Table 1').trim();
-      const tKey = tableNumber.toLowerCase();
-      const config = tablesMap.get(tKey) || { supervisor: 'Unassigned', cutterMaster: 'Unassigned', hall: 'Unassigned' };
+      const rawLot = String(assign.lotNumber || '').trim();
+      if (!rawLot || rawLot === '—') continue;
 
+      const normLot = rawLot.toLowerCase();
+
+      // Exclude any lot that is present in the Google Sheets Index sheet
+      if (cutLotSet.has(normLot)) {
+        continue;
+      }
+
+      const tableNumber = String(assign.tableNo || 'Table 1').trim();
       if (!tableClassification[tableNumber]) {
         tableClassification[tableNumber] = {
           tableNumber,
-          supervisor: config.supervisor,
-          cutterMaster: config.cutterMaster,
-          hall: config.hall,
+          supervisor: 'Unassigned',
+          cutterMaster: 'Unassigned',
+          hall: 'Unassigned',
           lots: []
         };
       }
 
-      tableClassification[tableNumber].lots.push({
-        lotNumber: assign.lotNumber || '—',
-        fabric: assign.fabric || '—',
-        shade: assign.shade || '—',
-        rolls: assign.totalRolls || 0,
-        weight: parseFloat(assign.totalWeight) || 0,
-        remarks: 'Cutting Pending',
-        issuedAt: assign.issuedAt || assign.createdAt
-      });
+      const lotKey = `${tableNumber.toLowerCase()}__${normLot}`;
+      if (tableLotsMap.has(lotKey)) {
+        const existing = tableLotsMap.get(lotKey);
+        existing.rolls += (parseInt(assign.totalRolls) || 0);
+        existing.weight = parseFloat((existing.weight + (parseFloat(assign.totalWeight) || 0)).toFixed(2));
+      } else {
+        const lotObj = {
+          lotNumber: rawLot,
+          fabric: assign.fabric || '—',
+          shade: assign.shade || '—',
+          rolls: parseInt(assign.totalRolls) || 0,
+          weight: parseFloat(parseFloat(assign.totalWeight || 0).toFixed(2)),
+          remarks: 'Cutting Pending',
+          issuedAt: assign.issuedAt || assign.createdAt
+        };
+        tableLotsMap.set(lotKey, lotObj);
+        tableClassification[tableNumber].lots.push(lotObj);
+      }
     }
 
     const result = Object.values(tableClassification);
@@ -2478,12 +2479,63 @@ let dailyCuttingReportCache = null;
 let dailyCuttingReportCacheTime = 0;
 const DAILY_CUTTING_CACHE_DURATION = 10 * 60 * 1000; // 10 minutes cache
 
+function extractYMDFromSavedAt(rawStr) {
+  if (!rawStr || rawStr === '—' || rawStr === 'null' || rawStr === 'undefined') return '';
+  const s = String(rawStr).trim();
+  if (!s) return '';
+
+  const monthMap = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+  };
+
+  // 1. Matches "Sat Aug 22 2026" or "Aug 22 2026"
+  const jsDateMatch = s.match(/(?:[a-zA-Z]{3,}\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})\s+(\d{4})/i);
+  if (jsDateMatch) {
+    const mNum = monthMap[jsDateMatch[1].toLowerCase().slice(0, 3)] || '01';
+    const day = jsDateMatch[2].padStart(2, '0');
+    const yr = jsDateMatch[3];
+    return `${yr}-${mNum}-${day}`;
+  }
+
+  // 2. Matches "22 Aug 2026" or "22-Aug-2026"
+  const dmyTextMatch = s.match(/(\d{1,2})[\s-]+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s-]+(\d{4})/i);
+  if (dmyTextMatch) {
+    const day = dmyTextMatch[1].padStart(2, '0');
+    const mNum = monthMap[dmyTextMatch[2].toLowerCase().slice(0, 3)] || '01';
+    const yr = dmyTextMatch[3];
+    return `${yr}-${mNum}-${day}`;
+  }
+
+  // 3. Check if ISO or YYYY-MM-DD
+  const ymd = s.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if (ymd) {
+    return `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
+  }
+
+  // 4. Check if DD/MM/YYYY or DD-MM-YYYY
+  const dmy = s.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+
+  // 5. Try native Date parse
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    const yr = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const da = String(d.getDate()).padStart(2, '0');
+    return `${yr}-${mo}-${da}`;
+  }
+
+  return '';
+}
+
 export const getDailyCuttingReportData = async (req, res) => {
   try {
     const reqDate = req.query.date ? String(req.query.date).trim() : new Date().toISOString().split('T')[0];
     const { sequelize } = await import('../models/index.js');
 
-    // Single O(1) B-Tree Index Joined Query executed natively inside MySQL engine (< 1ms)
     const sql = `
       SELECT 
         i.lotNumber AS \`Lot No\`,
@@ -2493,31 +2545,35 @@ export const getDailyCuttingReportData = async (req, res) => {
         COALESCE(NULLIF(i.garmentType, ''), j.garmentType, '—') AS \`Garment Type\`,
         COALESCE(NULLIF(i.partyName, ''), '—') AS \`Party Name\`,
         COALESCE(NULLIF(l.tableNo, ''), NULLIF(i.cuttingTable, ''), 'Table 1') AS \`Cutting Table\`,
-        CASE 
-          WHEN i.savedAt LIKE '____-__-__%' THEN LEFT(i.savedAt, 10)
-          ELSE DATE_FORMAT(i.createdAt, '%Y-%m-%d')
-        END AS \`Cutting Date\`,
+        COALESCE(NULLIF(i.savedAt, ''), '') AS \`Saved At\`,
         COALESCE(NULLIF(i.supervisor, ''), 'System') AS \`Supervisor\`,
         COALESCE(i.cuttingQty, 0) AS \`Total Qty\`
       FROM IndexSheetRecords i
       LEFT JOIN LotTableAssignments l ON i.lotNumber = l.lotNumber
       LEFT JOIN JobOrders j ON i.lotNumber = j.lotNumber
-      WHERE (:reqDate = 'all' OR (
-        CASE 
-          WHEN i.savedAt LIKE '____-__-__%' THEN LEFT(i.savedAt, 10)
-          ELSE DATE_FORMAT(i.createdAt, '%Y-%m-%d')
-        END = :reqDate
-      ))
+      WHERE i.savedAt IS NOT NULL AND TRIM(i.savedAt) != ''
       ORDER BY i.id DESC;
     `;
 
-    const [rows] = await sequelize.query(sql, {
-      replacements: { reqDate }
+    const [rows] = await sequelize.query(sql);
+
+    // Normalize Cutting Date using the Saved At column from Google Sheets
+    const processedRows = (rows || []).map(r => {
+      const cuttingDate = extractYMDFromSavedAt(r['Saved At']);
+      return {
+        ...r,
+        'Cutting Date': cuttingDate
+      };
     });
 
-    res.json({ success: true, data: rows });
+    // Filter by requested date (if not 'all')
+    const filteredRows = reqDate === 'all' 
+      ? processedRows 
+      : processedRows.filter(r => r['Cutting Date'] === reqDate);
+
+    res.json({ success: true, data: filteredRows });
   } catch (error) {
-    console.error('[Daily Cutting Report] O(1) Query Error:', error);
+    console.error('[Daily Cutting Report] Query Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

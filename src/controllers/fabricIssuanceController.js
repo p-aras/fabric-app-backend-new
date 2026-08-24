@@ -705,13 +705,20 @@ export const getLocationIssuanceReport = async (req, res) => {
       whereClause.issuedAt = {};
       if (startDate) {
         const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        whereClause.issuedAt[Op.gte] = start.toISOString();
+        if (!isNaN(start.getTime())) {
+          start.setHours(0, 0, 0, 0);
+          whereClause.issuedAt[Op.gte] = start.toISOString();
+        }
       }
       if (endDate) {
         const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        whereClause.issuedAt[Op.lte] = end.toISOString();
+        if (!isNaN(end.getTime())) {
+          end.setHours(23, 59, 59, 999);
+          whereClause.issuedAt[Op.lte] = end.toISOString();
+        }
+      }
+      if (Object.keys(whereClause.issuedAt).length === 0) {
+        delete whereClause.issuedAt;
       }
     }
 
@@ -916,20 +923,6 @@ export const getDailyFabricIssuanceReport = async (req, res) => {
     const { startDate, endDate, table, fabric } = req.query;
 
     let whereClause = {};
-    if (startDate || endDate) {
-      whereClause.issuedAt = {};
-      if (startDate) {
-        const start = new Date(startDate);
-        start.setHours(0, 0, 0, 0);
-        whereClause.issuedAt[Op.gte] = start.toISOString();
-      }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        whereClause.issuedAt[Op.lte] = end.toISOString();
-      }
-    }
-
     if (fabric) {
       whereClause.fabric = {
         [Op.like]: `%${fabric}%`
@@ -938,11 +931,31 @@ export const getDailyFabricIssuanceReport = async (req, res) => {
 
     const issuances = await FabricIssuance.findAll({
       where: whereClause,
-      order: [['issuedAt', 'DESC']]
+      order: [['id', 'DESC']]
     });
 
     const reportData = [];
+    const startYMD = startDate ? startDate.slice(0, 10) : '';
+    const endYMD = endDate ? endDate.slice(0, 10) : '';
+
     issuances.forEach(iss => {
+      let rawDate = iss.issuedAt || (iss.createdAt ? iss.createdAt.toISOString() : '');
+      let dateStr = '';
+      if (rawDate) {
+        const dMatch = String(rawDate).match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+        if (dMatch) {
+          dateStr = `${dMatch[1]}-${dMatch[2].padStart(2, '0')}-${dMatch[3].padStart(2, '0')}`;
+        } else {
+          const d = new Date(rawDate);
+          if (!isNaN(d.getTime())) {
+            dateStr = d.toISOString().slice(0, 10);
+          }
+        }
+      }
+
+      // Date filtering
+      if (startYMD && dateStr && dateStr < startYMD) return;
+      if (endYMD && dateStr && dateStr > endYMD) return;
       let items = [];
       try {
         items = iss.issuedItems ? JSON.parse(iss.issuedItems) : [];
@@ -953,8 +966,6 @@ export const getDailyFabricIssuanceReport = async (req, res) => {
       if (!Array.isArray(items)) {
         items = [];
       }
-
-      const dateStr = iss.issuedAt ? iss.issuedAt.slice(0, 10) : '';
 
       items.forEach(item => {
         // Table filter check (case-insensitive)
