@@ -58,6 +58,8 @@ import {
   completeBatch,
   fetchDyeingLotDetails,
   fetchSheetDataByLot,
+  fetchPendingStockByLot,
+  fetchDyeingRecdWeightByLot,
   fetchJobOrders,
   fetchInventoryRolls,
   getRawInventory,
@@ -188,6 +190,9 @@ router.get('/debug-issuances', async (req, res) => {
 router.get('/google-sheets/next-barcode-id', nextBarcodeId);
 router.get('/google-sheets/fetch-dyeing-lot-details', fetchDyeingLotDetails);
 router.get('/google-sheets/fetch-by-lot/:lotNo(*)', fetchSheetDataByLot);
+router.get('/google-sheets/pending-stock-by-lot/:lotNo(*)', fetchPendingStockByLot);
+router.get('/dyeing-materials/recd-weight-by-lot/:lotNo(*)', fetchDyeingRecdWeightByLot);
+router.get('/dyeing-materials/weight-by-lot/:lotNo(*)', fetchDyeingRecdWeightByLot);
 router.get('/google-sheets/job-orders', fetchJobOrders);
 router.get('/google-sheets/fabric-rolls', fetchInventoryRolls);
 router.get('/google-sheets/pending-cutting', getPendingCuttingLots);
@@ -411,5 +416,20 @@ router.put('/approval-requests/:id/respond', respondApprovalRequest);
 router.get('/approval-requests/status/:id', getApprovalStatus);
 router.put('/approval-requests/:id/consume', consumeApprovalRequest);
 router.put('/approval-requests/consume', consumeApprovalRequest);
+
+// --- SHORTAGE REPORT ROUTES ---
+import {
+  createShortageReport,
+  getShortageReports,
+  getShortageReportById,
+  updateShortageReportInspection,
+  deleteShortageReport
+} from '../controllers/shortageReportController.js';
+
+router.post('/shortage-reports', createShortageReport);
+router.get('/shortage-reports', getShortageReports);
+router.get('/shortage-reports/:id', getShortageReportById);
+router.put('/shortage-reports/:id/inspection', updateShortageReportInspection);
+router.delete('/shortage-reports/:id', deleteShortageReport);
 
 export default router;

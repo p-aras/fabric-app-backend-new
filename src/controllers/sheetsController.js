@@ -709,6 +709,225 @@ export const fetchSheetDataByLot = async (req, res) => {
   }
 };
 
+export const fetchPendingStockByLot = async (req, res) => {
+  try {
+    const { lotNo } = req.params;
+    if (!lotNo) {
+      return res.status(400).json({ success: false, message: 'Lot Number is required' });
+    }
+
+    console.log(`[Sheets API] Fetching PendingStock entries for Lot: ${lotNo}`);
+    const csvText = await getSheetDataCsvText();
+    const rows = parseCsvTextIntoRows(csvText);
+
+    const targetLot = String(lotNo).trim().toLowerCase();
+    const matches = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const cells = rows[i];
+      if (!cells || cells.length <= 2) continue;
+
+      const party = String(cells[0] || '').trim();
+      const itemName = String(cells[1] || '').trim();
+      const cellLot = String(cells[2] || '').trim();
+
+      // Skip header lines
+      if (
+        !cellLot ||
+        cellLot.toLowerCase() === 'lot no' ||
+        party.toLowerCase() === 'party' ||
+        party.includes('Mohit Hosiery') ||
+        party.includes('JW Status')
+      ) {
+        continue;
+      }
+
+      if (cellLot.toLowerCase() === targetLot) {
+        const issueNo = String(cells[3] || '').trim();
+        const issueDate = parseSheetDate(cells[4]);
+        const shade = String(cells[5] || '').trim();
+        const rectShade = String(cells[6] || '').trim();
+        const remarks = String(cells[7] || '').trim();
+
+        // Weights
+        const opQty = parseFloat(String(cells[8] || '0').replace(/,/g, '')) || 0.00;
+        const issueQty = parseFloat(String(cells[9] || '0').replace(/,/g, '')) || 0.00;
+        const receiptQty = parseFloat(String(cells[10] || '0').replace(/,/g, '')) || 0.00;
+        const shortage = parseFloat(String(cells[11] || '0').replace(/,/g, '')) || 0.00;
+        const shortPer = String(cells[12] || '').trim();
+        const balance = parseFloat(String(cells[13] || '0').replace(/,/g, '')) || 0.00;
+
+        // Rolls
+        const opRolls = parseInt(cells[14]) || 0;
+        const issueRolls = parseInt(cells[15]) || 0;
+        const rectRolls = parseInt(cells[16]) || 0;
+        const greyRolls = parseInt(cells[17]) || 0;
+        const balanceRolls = parseInt(cells[18]) || 0;
+
+        // Best weight candidates
+        const effectiveWeight = issueQty > 0 ? issueQty : (balance > 0 ? balance : opQty);
+        const effectiveBilledQty = opQty > 0 ? opQty : (issueQty > 0 ? issueQty : balance);
+
+        matches.push({
+          rowId: i,
+          lotNumber: cellLot,
+          party: party,
+          fabricName: itemName,
+          billNumber: issueNo,
+          issueDate: issueDate,
+          shade: shade,
+          rectShade: rectShade,
+          remarks: remarks,
+          opQty: opQty,
+          issueQty: issueQty,
+          receiptQty: receiptQty,
+          shortage: shortage,
+          shortPer: shortPer,
+          balance: balance,
+          opRolls: opRolls,
+          issueRolls: issueRolls,
+          rectRolls: rectRolls,
+          greyRolls: greyRolls,
+          balanceRolls: balanceRolls,
+          weight: effectiveWeight,
+          billedQty: effectiveBilledQty,
+          totalRolls: balanceRolls || issueRolls || opRolls || 1
+        });
+      }
+    }
+
+    console.log(`[Sheets API] Found ${matches.length} matching PendingStock entries for lot ${lotNo}`);
+
+    return res.json({
+      success: true,
+      lotNumber: lotNo,
+      count: matches.length,
+      data: matches
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching PendingStock by lot:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const fetchDyeingRecdWeightByLot = async (req, res) => {
+  try {
+    const rawLot = req.params.lotNo;
+    if (!rawLot) {
+      return res.status(400).json({ success: false, message: 'Lot Number is required' });
+    }
+
+    const cleanLot = decodeURIComponent(rawLot).trim();
+    console.log(`[DyeingMaterial DB] Querying received weight for Lot: "${cleanLot}"`);
+
+    let dyeingMaterials = [];
+    try {
+      dyeingMaterials = await DyeingMaterial.findAll({
+        where: {
+          [Op.or]: [
+            { lotNumber: cleanLot },
+            { lotNumber: cleanLot.toLowerCase() },
+            { lotNumber: cleanLot.toUpperCase() },
+            { lotNumber: { [Op.like]: `%${cleanLot}%` } }
+          ]
+        },
+        order: [['id', 'ASC']]
+      });
+    } catch (modelErr) {
+      console.warn('[DyeingMaterial DB] DyeingMaterial.findAll failed, using raw SQL query:', modelErr.message);
+      const [rawRows] = await sequelize.query(
+        'SELECT * FROM DyeingMaterials WHERE LOWER(lotNumber) = LOWER(?) OR lotNumber LIKE ? ORDER BY id ASC',
+        { replacements: [cleanLot, `%${cleanLot}%`] }
+      );
+      dyeingMaterials = rawRows || [];
+    }
+
+    let totalWeight = 0;
+    let fabricWeight = 0;
+    let fabricRolls = 0;
+    let ribWeight = 0;
+    let ribRolls = 0;
+
+    const rollsList = [];
+    const shadeMap = {};
+    const fabricMap = {};
+
+    dyeingMaterials.forEach(dm => {
+      const wt = parseFloat(dm.weight) || 0;
+      totalWeight += wt;
+
+      const fName = String(dm.fabricName || dm.cmfName || '').trim();
+      const isRib = fName.toUpperCase().includes('RIB');
+
+      if (isRib) {
+        ribWeight += wt;
+        ribRolls += 1;
+      } else {
+        fabricWeight += wt;
+        fabricRolls += 1;
+      }
+
+      // Fabric name breakdown
+      if (fName) {
+        if (!fabricMap[fName]) fabricMap[fName] = { count: 0, weight: 0, isRib };
+        fabricMap[fName].count += 1;
+        fabricMap[fName].weight += wt;
+      }
+
+      rollsList.push({
+        barcodeId: dm.barcodeId,
+        rollNumber: dm.rollNumber,
+        fabricName: dm.fabricName || dm.cmfName,
+        isRib,
+        shade: dm.shade,
+        weight: parseFloat(wt.toFixed(3)),
+        location: dm.location,
+        receivedPerson: dm.receivedPerson,
+        date: dm.date
+      });
+
+      const s = String(dm.shade || '').trim();
+      if (s) {
+        if (!shadeMap[s]) shadeMap[s] = { count: 0, weight: 0 };
+        shadeMap[s].count += 1;
+        shadeMap[s].weight += wt;
+      }
+    });
+
+    // Format weights
+    Object.keys(shadeMap).forEach(k => {
+      shadeMap[k].weight = parseFloat(shadeMap[k].weight.toFixed(3));
+    });
+    Object.keys(fabricMap).forEach(k => {
+      fabricMap[k].weight = parseFloat(fabricMap[k].weight.toFixed(3));
+    });
+
+    console.log(`[DyeingMaterial DB] Found ${dyeingMaterials.length} rolls for lot "${cleanLot}". Total: ${totalWeight.toFixed(3)}kg (Fabric: ${fabricWeight.toFixed(3)}kg / ${fabricRolls} rolls, RIB: ${ribWeight.toFixed(3)}kg / ${ribRolls} rolls)`);
+
+    return res.json({
+      success: true,
+      lotNumber: cleanLot,
+      totalRecdWeight: parseFloat(totalWeight.toFixed(3)),
+      totalRecdRolls: dyeingMaterials.length,
+      fabricRecdWeight: parseFloat(fabricWeight.toFixed(3)),
+      fabricRecdRolls: fabricRolls,
+      ribRecdWeight: parseFloat(ribWeight.toFixed(3)),
+      ribRecdRolls: ribRolls,
+      breakdownByFabric: fabricMap,
+      shades: shadeMap,
+      rolls: rollsList
+    });
+  } catch (error) {
+    console.error('[DyeingMaterial DB] Error querying received weight by lot:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch received weight from DyeingMaterial database',
+      error: error.message
+    });
+  }
+};
+
+
 export const fetchJobOrders = async (req, res) => {
   try {
     const csvText = await getJobOrdersCsvText();
@@ -1963,7 +2182,7 @@ export const getPendingCuttingLots = async (req, res) => {
   try {
     const isRefresh = req.query.refresh === 'true';
     const result = await fetchPendingCuttingDataFromSheets(isRefresh);
-    
+
     // Filter out cancelled status for the pending cutting lots report
     const filteredRows = (result.rows || []).filter((r) => {
       const s = (r.Status ?? "").toString();
@@ -1990,9 +2209,9 @@ export const debugLotCutting = async (req, res) => {
     const JOB_RANGE = "JobOrder!A:AZ";
     const jobRes = await fetchSheet({ sheetId: JOB_SHEET_ID, range: JOB_RANGE, apiKey: API_KEY });
     let jobRows = convertValuesToObjects(jobRes.values);
-    
+
     const rawRow = jobRows.find(r => String(r["Lot No"] || "").trim() === req.params.lot);
-    
+
     const BUDGET_SHEET_ID = "1Hj3JeJEKB43aYYWv8gk2UhdU6BWuEQfCg5pBlTdBMNA";
     const INDEX_SHEET_NAME = "Index";
     const INDEX_RANGE = `${INDEX_SHEET_NAME}!A:K`;
@@ -2034,7 +2253,7 @@ async function getAllCutLotsFromIndexSheet() {
 
     const idxRes = await fetchSheet({ sheetId: BUDGET_SHEET_ID, range: INDEX_RANGE, apiKey: API_KEY });
     const idxValues = idxRes.values || [];
-    
+
     for (let i = 0; i < idxValues.length; i++) {
       const lot = String(idxValues[i]?.[0] || '').trim();
       // Skip empty or generic header text
@@ -2567,8 +2786,8 @@ export const getDailyCuttingReportData = async (req, res) => {
     });
 
     // Filter by requested date (if not 'all')
-    const filteredRows = reqDate === 'all' 
-      ? processedRows 
+    const filteredRows = reqDate === 'all'
+      ? processedRows
       : processedRows.filter(r => r['Cutting Date'] === reqDate);
 
     res.json({ success: true, data: filteredRows });

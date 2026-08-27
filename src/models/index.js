@@ -557,6 +557,43 @@ export const CuttingMatrixRecord = sequelize.define('CuttingMatrixRecord', {
   ]
 });
 
+// --- SHORTAGE REPORT MODEL ---
+export const ShortageReport = sequelize.define('ShortageReport', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  lotNumber: { type: DataTypes.STRING(50), allowNull: false },
+  jobOrderNo: { type: DataTypes.STRING(50) },
+  billNumber: { type: DataTypes.STRING(50) },
+  fabricName: { type: DataTypes.STRING(255) },
+  shade: { type: DataTypes.STRING(100) },
+  tableNo: { type: DataTypes.STRING(50) },
+  unit: { type: DataTypes.STRING(20), defaultValue: 'KGs' },
+  requiredQty: { type: DataTypes.DECIMAL(12, 3), defaultValue: 0.000 },
+  billedQty: { type: DataTypes.DECIMAL(12, 3), defaultValue: 0.000 },
+  issuedQty: { type: DataTypes.DECIMAL(12, 3), defaultValue: 0.000 },
+  issuedRolls: { type: DataTypes.INTEGER, defaultValue: 0 },
+  recdWeight: { type: DataTypes.DECIMAL(12, 3), defaultValue: 0.000 },
+  shortageQty: { type: DataTypes.DECIMAL(12, 3), defaultValue: 0.000 },
+  shortagePercentage: { type: DataTypes.DECIMAL(8, 2), defaultValue: 0.00 },
+  reason: { type: DataTypes.STRING(255) },
+  reportedBy: { type: DataTypes.STRING(100) },
+  date: { type: DataTypes.DATEONLY },
+  issueDate: { type: DataTypes.STRING(50) },
+  remarks: { type: DataTypes.TEXT },
+  cmfParty: { type: DataTypes.STRING(255) },
+  process: { type: DataTypes.STRING(100) },
+  selectedEntries: { type: DataTypes.JSON },
+  inspectionDetails: { type: DataTypes.JSON },
+  status: { type: DataTypes.STRING(50), defaultValue: 'Submitted' }
+}, {
+  tableName: 'ShortageReports',
+  indexes: [
+    { fields: ['lotNumber'] },
+    { fields: ['billNumber'] },
+    { fields: ['date'] },
+    { fields: ['status'] }
+  ]
+});
+
 export { sequelize };
 
 export default {
@@ -587,5 +624,6 @@ export default {
   IssuedBarcode,
   CuttingSheetRecord,
   IndexSheetRecord,
-  CuttingMatrixRecord
+  CuttingMatrixRecord,
+  ShortageReport
 };

@@ -192,6 +192,52 @@ const startServer = async () => {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
       `);
       console.log('✅ Guaranteed LotTableAssignments table created in Aiven MySQL database.');
+
+      // Ensure ShortageReports table exists in MySQL
+      try {
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS \`ShortageReports\` (
+            \`id\` INTEGER NOT NULL AUTO_INCREMENT,
+            \`lotNumber\` VARCHAR(50) NOT NULL,
+            \`jobOrderNo\` VARCHAR(50) NULL,
+            \`billNumber\` VARCHAR(50) NULL,
+            \`fabricName\` VARCHAR(255) NULL,
+            \`shade\` VARCHAR(100) NULL,
+            \`tableNo\` VARCHAR(50) NULL,
+            \`unit\` VARCHAR(20) DEFAULT 'KGs',
+            \`requiredQty\` DECIMAL(12,3) DEFAULT 0.000,
+            \`billedQty\` DECIMAL(12,3) DEFAULT 0.000,
+            \`issuedQty\` DECIMAL(12,3) DEFAULT 0.000,
+            \`issuedRolls\` INTEGER DEFAULT 0,
+            \`recdWeight\` DECIMAL(12,3) DEFAULT 0.000,
+            \`shortageQty\` DECIMAL(12,3) DEFAULT 0.000,
+            \`shortagePercentage\` DECIMAL(8,2) DEFAULT 0.00,
+            \`reason\` VARCHAR(255) NULL,
+            \`reportedBy\` VARCHAR(100) NULL,
+            \`date\` DATE NULL,
+            \`issueDate\` VARCHAR(50) NULL,
+            \`remarks\` TEXT NULL,
+            \`cmfParty\` VARCHAR(255) NULL,
+            \`process\` VARCHAR(100) NULL,
+            \`selectedEntries\` JSON NULL,
+            \`inspectionDetails\` JSON NULL,
+            \`status\` VARCHAR(50) DEFAULT 'Submitted',
+            \`createdAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            \`updatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (\`id\`)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `);
+
+        // Safe alter table column check
+        try {
+          await sequelize.query("ALTER TABLE `ShortageReports` ADD COLUMN `inspectionDetails` JSON NULL;");
+        } catch(e) {
+          // Column already exists, safe to ignore
+        }
+        console.log('✅ Guaranteed ShortageReports table created in MySQL database.');
+      } catch (shortageErr) {
+        console.warn('Info: CREATE TABLE ShortageReports notice:', shortageErr.message);
+      }
     } catch (createErr) {
       console.warn('Info: CREATE TABLE LotTableAssignments notice:', createErr.message);
     }
