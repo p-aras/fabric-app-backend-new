@@ -570,75 +570,112 @@ export const updateReturnSticker = async (req, res) => {
       authorizedBy: authorizedBy || returnRecord.authorizedBy
     }, { transaction });
 
-    // Register a new active roll in DyeingMaterial table under the new R-prefix barcode
-    const originalRoll = await DyeingMaterial.findOne({
+    // Register the returned roll as an active in-stock roll in DyeingMaterial and Material tables
+    let originalRoll = await DyeingMaterial.findOne({
       where: { barcodeId: originalBarcodeId },
       transaction
     });
 
-    if (originalRoll) {
-      await DyeingMaterial.create({
-        barcodeId: newBarcodeId,
-        batchNumber: originalRoll.batchNumber || '',
-        batchDate: originalRoll.batchDate || '',
-        batchTime: originalRoll.batchTime || '',
-        cmfName: originalRoll.cmfName || '',
-        fabricName: originalRoll.fabricName || '',
-        lotNumber: originalRoll.lotNumber || '',
-        group: originalRoll.group || '',
-        shade: originalRoll.shade || '',
-        billNumber: originalRoll.billNumber || '',
-        date: new Date().toISOString().slice(0, 10),
-        location: location || returnRecord.location || originalRoll.location || '',
-        receivedPerson: receivedBy || returnRecord.receivedBy || originalRoll.receivedPerson || '',
-        authorizedPerson: authorizedBy || returnRecord.authorizedBy || originalRoll.authorizedPerson || '',
-        rollNumber: 1,
-        batchTotal: 1,
-        batchStatus: 'completed',
-        weight: parseFloat(returnRecord.returnedWeight) || 0.00,
-        status: 'in_stock' // The returned roll is now in stock under the new barcode
-      }, { transaction });
+    if (!originalRoll) {
+      originalRoll = await Material.findOne({
+        where: { code: originalBarcodeId },
+        transaction
+      });
+    }
 
-      // Create matching Material record for active inventory
+    if (!originalRoll) {
+      originalRoll = await Inventory.findOne({
+        where: { barcode: originalBarcodeId },
+        transaction
+      });
+    }
+
+    const isKharcha = originalBarcodeId && originalBarcodeId.startsWith('KHARCHA-');
+    const rollFabric = returnRecord.fabricName || originalRoll?.fabricName || originalRoll?.name || originalRoll?.item_description || (isKharcha ? 'Returned Accessories' : 'Returned Fabric');
+    const rollShade = returnRecord.shade || originalRoll?.shade || originalRoll?.color || 'N/A';
+    const rollLot = String(returnRecord.lotNumber || originalRoll?.lotNumber || originalRoll?.lotNo || originalRoll?.lot_no || '');
+    const rollParty = returnRecord.party || returnRecord.cmfName || originalRoll?.cmfName || originalRoll?.party || originalRoll?.receivedPerson || '';
+    const rollWeight = parseFloat(returnRecord.returnedWeight || returnRecord.weight) || 0.00;
+    const rollLocation = location || returnRecord.location || originalRoll?.location || 'Store';
+    const rollRcvBy = receivedBy || returnRecord.receivedBy || originalRoll?.receivedPerson || 'Production Manager';
+    const rollAuthBy = authorizedBy || returnRecord.authorizedBy || originalRoll?.authorizedPerson || 'Store Manager';
+    const rollBill = originalRoll?.billNumber || originalRoll?.bill_no || '';
+    const rollGroup = originalRoll?.group || originalRoll?.subCategory || (isKharcha ? 'Kharcha' : 'RETURNED');
+
+    // 1. Create or update in DyeingMaterial (unless it's Kharcha)
+    if (!isKharcha) {
+      const existingDm = await DyeingMaterial.findOne({
+        where: { barcodeId: newBarcodeId },
+        transaction
+      });
+      if (!existingDm) {
+        await DyeingMaterial.create({
+          barcodeId: newBarcodeId,
+          batchNumber: originalRoll?.batchNumber || '',
+          batchDate: originalRoll?.batchDate || '',
+          batchTime: originalRoll?.batchTime || '',
+          cmfName: rollParty,
+          fabricName: rollFabric,
+          lotNumber: rollLot,
+          group: rollGroup,
+          shade: rollShade,
+          billNumber: rollBill,
+          date: new Date().toISOString().slice(0, 10),
+          location: rollLocation,
+          receivedPerson: rollRcvBy,
+          authorizedPerson: rollAuthBy,
+          rollNumber: 1,
+          batchTotal: 1,
+          batchStatus: 'completed',
+          weight: rollWeight,
+          status: 'in_stock'
+        }, { transaction });
+      } else {
+        await existingDm.update({
+          weight: rollWeight,
+          status: 'in_stock',
+          location: rollLocation,
+          cmfName: rollParty,
+          fabricName: rollFabric,
+          shade: rollShade
+        }, { transaction });
+      }
+    }
+
+    // 2. Create or update in Material
+    const existingMat = await Material.findOne({
+      where: { code: newBarcodeId },
+      transaction
+    });
+    if (!existingMat) {
       await Material.create({
         code: newBarcodeId,
-        name: originalRoll.fabricName || originalRoll.cmfName || 'Returned Dyeing Fabric',
-        category: 'Summer Fabric',
-        subCategory: originalRoll.group || '',
-        color: originalRoll.shade || '',
+        name: rollFabric,
+        category: isKharcha ? 'Accessories' : 'Summer Fabric',
+        subCategory: rollGroup,
+        color: rollShade,
         supplier: null,
-        weight: parseFloat(returnRecord.returnedWeight) || 0.00,
+        weight: rollWeight,
         rolls: 1,
-        unit: 'Roll',
-        location: location || returnRecord.location || originalRoll.location || '',
+        unit: isKharcha ? 'Pcs' : 'Roll',
+        location: rollLocation,
         status: 'Active',
-        stockKg: parseFloat(returnRecord.returnedWeight) || 0.00,
-        billNumber: originalRoll.billNumber || '',
-        receivedPerson: receivedBy || returnRecord.receivedBy || '',
-        authorizedPerson: authorizedBy || returnRecord.authorizedBy || '',
+        stockKg: rollWeight,
+        billNumber: rollBill,
+        receivedPerson: rollRcvBy,
+        authorizedPerson: rollAuthBy,
         receivedDate: new Date().toISOString().slice(0, 10),
-        lotNo: originalRoll.lotNumber || ''
+        lotNo: rollLot
       }, { transaction });
-    } else if (originalBarcodeId && originalBarcodeId.startsWith('KHARCHA-')) {
-      // Create matching Material record for active accessory inventory
-      await Material.create({
-        code: newBarcodeId,
-        name: returnRecord.fabricName || 'Returned Accessories',
-        category: 'Accessories',
-        subCategory: 'Kharcha',
-        color: returnRecord.shade || 'N/A',
-        supplier: null,
-        weight: parseFloat(returnRecord.returnedWeight) || 0.00,
+    } else {
+      await existingMat.update({
+        weight: rollWeight,
+        stockKg: rollWeight,
         rolls: 1,
-        unit: 'Pcs',
-        location: location || returnRecord.location || '',
         status: 'Active',
-        stockKg: parseFloat(returnRecord.returnedWeight) || 0.00,
-        billNumber: '',
-        receivedPerson: receivedBy || returnRecord.receivedBy || '',
-        authorizedPerson: authorizedBy || returnRecord.authorizedBy || '',
-        receivedDate: new Date().toISOString().slice(0, 10),
-        lotNo: returnRecord.lotNumber || ''
+        location: rollLocation,
+        name: rollFabric,
+        color: rollShade
       }, { transaction });
     }
 

@@ -51,13 +51,39 @@ export const findAvailableLocation = async (category) => {
   }
 };
 
+// In-memory cache for Suppliers and Filter Options to eliminate repeated full-table scans
+let cachedSuppliers = null;
+let suppliersCacheTime = 0;
+const SUPPLIERS_TTL = 10 * 60 * 1000; // 10 minutes
+
+let cachedFilterOptions = null;
+let filterOptionsCacheTime = 0;
+const FILTER_OPTIONS_TTL = 10 * 60 * 1000; // 10 minutes
+
+let cachedTotalCounts = null;
+let totalCountsCacheTime = 0;
+const TOTAL_COUNTS_TTL = 3 * 60 * 1000; // 3 minutes
+
+export const invalidateMaterialCaches = () => {
+  cachedFilterOptions = null;
+  cachedSuppliers = null;
+  cachedTotalCounts = null;
+  filterOptionsCacheTime = 0;
+  suppliersCacheTime = 0;
+  totalCountsCacheTime = 0;
+};
+
 export const getMaterials = async (req, res) => {
   try {
     const page = req.query.page ? parseInt(req.query.page) : null;
     const limit = req.query.limit ? parseInt(req.query.limit) : 50;
 
-    // Load all Suppliers for mapping ID to Name
-    const suppliers = await Supplier.findAll();
+    // Load all Suppliers using cache
+    if (!cachedSuppliers || (Date.now() - suppliersCacheTime >= SUPPLIERS_TTL)) {
+      cachedSuppliers = await Supplier.findAll({ raw: true });
+      suppliersCacheTime = Date.now();
+    }
+    const suppliers = cachedSuppliers || [];
     const supplierMap = {};
     suppliers.forEach(s => {
       supplierMap[s.id] = s.name;
@@ -278,7 +304,7 @@ export const getMaterials = async (req, res) => {
       category: 'Dyeing',
       subCategory: item.group || '',
       color: item.shade || '',
-      supplier: null,
+      supplier: item.cmfName || null,
       weight: parseFloat(item.weight) || 0.00,
       rolls: 1,
       unit: 'Roll',
@@ -291,14 +317,30 @@ export const getMaterials = async (req, res) => {
       updatedAt: item.updatedAt
     });
 
-    // Query counts
-    const [materialsCount, dyeingCount] = await Promise.all([
-      Material.count({ where: materialWhere }),
-      DyeingMaterial.count({ where: dyeingWhere })
-    ]);
+    // Query counts (cached for unfiltered views to eliminate count roundtrips)
+    let materialsCount = 0;
+    let dyeingCount = 0;
+    const isUnfiltered = Object.keys(materialWhere).length === 0 && Object.keys(dyeingWhere).length === 0;
+
+    if (isUnfiltered && cachedTotalCounts && (Date.now() - totalCountsCacheTime < TOTAL_COUNTS_TTL)) {
+      materialsCount = cachedTotalCounts.materialsCount;
+      dyeingCount = cachedTotalCounts.dyeingCount;
+    } else {
+      const [mCount, dCount] = await Promise.all([
+        Material.count({ where: materialWhere }),
+        DyeingMaterial.count({ where: dyeingWhere })
+      ]);
+      materialsCount = mCount;
+      dyeingCount = dCount;
+
+      if (isUnfiltered) {
+        cachedTotalCounts = { materialsCount, dyeingCount };
+        totalCountsCacheTime = Date.now();
+      }
+    }
     const totalCount = materialsCount + dyeingCount;
 
-    // Fetch paginated data
+    // Fetch paginated data (using raw: true for maximum speed)
     let combinedFiltered = [];
     if (page !== null) {
       const offset = (page - 1) * limit;
@@ -308,15 +350,15 @@ export const getMaterials = async (req, res) => {
           where: materialWhere,
           order: [['id', 'DESC']],
           limit: limitFromMaterials,
-          offset: offset
+          offset: offset,
+          raw: true
         });
         
-        combinedFiltered.push(...mats.map(m => {
-          const item = m.toJSON ? m.toJSON() : { ...m };
-          item.inventoryType = (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory';
-          item.receivedDate = item.receivedDate || '';
-          return item;
-        }));
+        combinedFiltered.push(...mats.map(item => ({
+          ...item,
+          inventoryType: (item.unit === 'MTR' || item.unit === 'Mtr') ? 'FabricStock(Mtrs)' : 'Normal Inventory',
+          receivedDate: item.receivedDate || ''
+        })));
 
         if (combinedFiltered.length < limit) {
           const limitFromDyeing = limit - combinedFiltered.length;
@@ -324,7 +366,8 @@ export const getMaterials = async (req, res) => {
             where: dyeingWhere,
             order: [['id', 'DESC']],
             limit: limitFromDyeing,
-            offset: 0
+            offset: 0,
+            raw: true
           });
           combinedFiltered.push(...dyeings.map(mapDyeingItem));
         }
@@ -334,7 +377,8 @@ export const getMaterials = async (req, res) => {
           where: dyeingWhere,
           order: [['id', 'DESC']],
           limit: limit,
-          offset: dyeingOffset
+          offset: dyeingOffset,
+          raw: true
         });
         combinedFiltered.push(...dyeings.map(mapDyeingItem));
       }
@@ -353,30 +397,35 @@ export const getMaterials = async (req, res) => {
       combinedFiltered.push(...dyeings.map(mapDyeingItem));
     }
 
-    // Load filter options dynamically using optimized distinct queries
-    const [uniqueCatsMats, uniqueColorsMats, uniqueLocationsMats, uniqueNamesMats, uniqueSubCatsMats] = await Promise.all([
-      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('category')), 'category']], raw: true }),
-      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('color')), 'color']], raw: true }),
-      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
-      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('name')), 'name']], raw: true }),
-      Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('subCategory')), 'subCategory']], raw: true }),
-    ]);
+    // Load filter options dynamically with in-memory caching
+    let filterOptions = cachedFilterOptions;
+    if (!filterOptions || (Date.now() - filterOptionsCacheTime >= FILTER_OPTIONS_TTL)) {
+      const [uniqueCatsMats, uniqueColorsMats, uniqueLocationsMats, uniqueNamesMats, uniqueSubCatsMats] = await Promise.all([
+        Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('category')), 'category']], raw: true }),
+        Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('color')), 'color']], raw: true }),
+        Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
+        Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('name')), 'name']], raw: true }),
+        Material.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('subCategory')), 'subCategory']], raw: true }),
+      ]);
 
-    const [uniqueColorsDye, uniqueLocationsDye, uniqueNamesDye, uniqueSubCatsDye] = await Promise.all([
-      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('shade')), 'color']], raw: true }),
-      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
-      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('fabricName')), 'name']], raw: true }),
-      DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('group')), 'subCategory']], raw: true }),
-    ]);
+      const [uniqueColorsDye, uniqueLocationsDye, uniqueNamesDye, uniqueSubCatsDye] = await Promise.all([
+        DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('shade')), 'color']], raw: true }),
+        DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('location')), 'location']], raw: true }),
+        DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('fabricName')), 'name']], raw: true }),
+        DyeingMaterial.findAll({ attributes: [[sequelize.fn('DISTINCT', sequelize.col('group')), 'subCategory']], raw: true }),
+      ]);
 
-    const filterOptions = {
-      categories: [...new Set([...uniqueCatsMats.map(x => x.category), 'Dyeing'])].filter(Boolean).sort(),
-      colors: [...new Set([...uniqueColorsMats.map(x => x.color), ...uniqueColorsDye.map(x => x.color)])].filter(Boolean).sort(),
-      locations: [...new Set([...uniqueLocationsMats.map(x => x.location), ...uniqueLocationsDye.map(x => x.location)])].filter(Boolean).sort(),
-      names: [...new Set([...uniqueNamesMats.map(x => x.name), ...uniqueNamesDye.map(x => x.name)])].filter(Boolean).sort(),
-      subCategories: [...new Set([...uniqueSubCatsMats.map(x => x.subCategory), ...uniqueSubCatsDye.map(x => x.subCategory)])].filter(Boolean).sort(),
-      suppliers: [...new Set(suppliers.map(s => s.name).filter(Boolean))].sort()
-    };
+      filterOptions = {
+        categories: [...new Set([...uniqueCatsMats.map(x => x.category), 'Dyeing'])].filter(Boolean).sort(),
+        colors: [...new Set([...uniqueColorsMats.map(x => x.color), ...uniqueColorsDye.map(x => x.color)])].filter(Boolean).sort(),
+        locations: [...new Set([...uniqueLocationsMats.map(x => x.location), ...uniqueLocationsDye.map(x => x.location)])].filter(Boolean).sort(),
+        names: [...new Set([...uniqueNamesMats.map(x => x.name), ...uniqueNamesDye.map(x => x.name)])].filter(Boolean).sort(),
+        subCategories: [...new Set([...uniqueSubCatsMats.map(x => x.subCategory), ...uniqueSubCatsDye.map(x => x.subCategory)])].filter(Boolean).sort(),
+        suppliers: [...new Set(suppliers.map(s => s.name).filter(Boolean))].sort()
+      };
+      cachedFilterOptions = filterOptions;
+      filterOptionsCacheTime = Date.now();
+    }
 
     if (page !== null) {
       res.json({
@@ -461,6 +510,7 @@ export const addMaterial = async (req, res) => {
       location
     });
 
+    invalidateMaterialCaches();
     await addAuditLog('New Material Created', `${material.code}: ${material.name} added`, 'Admin User', 'create');
     res.json(material);
   } catch (error) {
@@ -479,6 +529,7 @@ export const updateMaterial = async (req, res) => {
     await checkShelfCapacity(targetLocation, targetRolls, material.id);
 
     await material.update(req.body);
+    invalidateMaterialCaches();
     res.json(material);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -492,6 +543,7 @@ export const deleteMaterial = async (req, res) => {
     if (!material) return res.status(404).json({ error: 'Material not found' });
 
     await material.destroy();
+    invalidateMaterialCaches();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });

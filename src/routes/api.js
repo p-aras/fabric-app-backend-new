@@ -120,6 +120,22 @@ import {
   completeReAddBatch
 } from '../controllers/reAddMaterialController.js';
 
+import {
+  createShortageReport,
+  getShortageReports,
+  getShortageReportById,
+  updateShortageReportInspection,
+  deleteShortageReport
+} from '../controllers/shortageReportController.js';
+
+import {
+  getApprovalRequests,
+  createApprovalRequest,
+  respondApprovalRequest,
+  getApprovalStatus,
+  consumeApprovalRequest
+} from '../controllers/approvalController.js';
+
 // Import auth middleware
 import { authMiddleware } from '../middleware/auth.js';
 
@@ -193,6 +209,36 @@ router.get('/google-sheets/fetch-by-lot/:lotNo(*)', fetchSheetDataByLot);
 router.get('/google-sheets/pending-stock-by-lot/:lotNo(*)', fetchPendingStockByLot);
 router.get('/dyeing-materials/recd-weight-by-lot/:lotNo(*)', fetchDyeingRecdWeightByLot);
 router.get('/dyeing-materials/weight-by-lot/:lotNo(*)', fetchDyeingRecdWeightByLot);
+router.get('/dyeing-materials/recent', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 60;
+    const lotNumber = req.query.lotNumber;
+    const where = {};
+    if (lotNumber) where.lotNumber = lotNumber;
+    const rolls = await DyeingMaterial.findAll({
+      where,
+      order: [['id', 'DESC']],
+      limit,
+      raw: true
+    });
+    res.json({ success: true, count: rolls.length, data: rolls });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+router.delete('/dyeing-materials/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const roll = await DyeingMaterial.findByPk(id);
+    if (!roll) {
+      return res.status(404).json({ success: false, message: 'Dyeing roll not found' });
+    }
+    await roll.destroy();
+    res.json({ success: true, message: 'Dyeing roll deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 router.get('/google-sheets/job-orders', fetchJobOrders);
 router.get('/google-sheets/fabric-rolls', fetchInventoryRolls);
 router.get('/google-sheets/pending-cutting', getPendingCuttingLots);
@@ -247,6 +293,13 @@ router.post('/fabric-receiving/store-fabric-receiving', storeFabricReceiving);
 router.get('/fabric-receiving/check-barcode/:barcodeId', checkBarcode);
 router.get('/fabric-receiving/next-return-barcode', nextReturnBarcode);
 router.post('/fabric-receiving/update-return-sticker', updateReturnSticker);
+
+// Shortage Report Endpoints (Accessible for floor reporting, audits and MD Sequenced Reports)
+router.post('/shortage-reports', createShortageReport);
+router.get('/shortage-reports', getShortageReports);
+router.get('/shortage-reports/:id', getShortageReportById);
+router.put('/shortage-reports/:id/inspection', updateShortageReportInspection);
+router.delete('/shortage-reports/:id', deleteShortageReport);
 
 // Protected routes using authMiddleware
 router.use(authMiddleware);
@@ -402,34 +455,11 @@ router.post('/staff', async (req, res) => {
   }
 });
 
-import {
-  getApprovalRequests,
-  createApprovalRequest,
-  respondApprovalRequest,
-  getApprovalStatus,
-  consumeApprovalRequest
-} from '../controllers/approvalController.js';
-
 router.get('/approval-requests', getApprovalRequests);
 router.post('/approval-requests', createApprovalRequest);
 router.put('/approval-requests/:id/respond', respondApprovalRequest);
 router.get('/approval-requests/status/:id', getApprovalStatus);
 router.put('/approval-requests/:id/consume', consumeApprovalRequest);
 router.put('/approval-requests/consume', consumeApprovalRequest);
-
-// --- SHORTAGE REPORT ROUTES ---
-import {
-  createShortageReport,
-  getShortageReports,
-  getShortageReportById,
-  updateShortageReportInspection,
-  deleteShortageReport
-} from '../controllers/shortageReportController.js';
-
-router.post('/shortage-reports', createShortageReport);
-router.get('/shortage-reports', getShortageReports);
-router.get('/shortage-reports/:id', getShortageReportById);
-router.put('/shortage-reports/:id/inspection', updateShortageReportInspection);
-router.delete('/shortage-reports/:id', deleteShortageReport);
 
 export default router;

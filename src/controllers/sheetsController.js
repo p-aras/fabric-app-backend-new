@@ -1,4 +1,4 @@
-import { Material, Room, DyeingMaterial, JobOrder, Inventory, Supplier, FabricIssuance, Table, User } from '../models/index.js';
+import { Material, Room, DyeingMaterial, JobOrder, Inventory, Supplier, FabricIssuance, Table, User, FabricReturn } from '../models/index.js';
 import { addAuditLog, checkShelfCapacity } from './materialController.js';
 import { Op } from 'sequelize';
 import sequelize from '../config/db.js';
@@ -1527,6 +1527,97 @@ export const findRollByBarcode = async (req, res) => {
           'cmfName': inv.party || '',
           'Location': inv.location || '',
           'Unit': inv.unit || 'KGS'
+        }
+      });
+    }
+
+    // Try finding in FabricReturn (for return sticker barcodes, e.g. R-prefix or return barcodeId)
+    const cleanBarcodeId = String(barcodeId).trim();
+    const ret = await FabricReturn.findOne({
+      where: {
+        [Op.or]: [
+          { newBarcodeId: cleanBarcodeId },
+          { barcodeId: cleanBarcodeId },
+          { originalBarcodeId: cleanBarcodeId }
+        ]
+      },
+      order: [['id', 'DESC']]
+    });
+
+    if (ret) {
+      console.log(`✅ [Inventory API] Found return roll ${barcodeId} in FabricReturn database`);
+      const returnRollBarcode = ret.newBarcodeId || ret.barcodeId || cleanBarcodeId;
+      const rollWeight = parseFloat(ret.returnedWeight || ret.weight) || 0.00;
+      const rollFabric = ret.fabricName || ret.cmfName || 'Returned Fabric';
+      const rollShade = ret.shade || '';
+      const rollParty = ret.party || ret.cmfName || '';
+      const rollLocation = ret.location || 'Store';
+      const rollLot = String(ret.lotNumber || '');
+
+      // Ensure this returned roll exists in DyeingMaterial and Material for active stock visibility
+      try {
+        const existingDm = await DyeingMaterial.findOne({ where: { barcodeId: returnRollBarcode } });
+        if (!existingDm) {
+          await DyeingMaterial.create({
+            barcodeId: returnRollBarcode,
+            cmfName: rollParty,
+            fabricName: rollFabric,
+            lotNumber: rollLot,
+            group: 'RETURNED',
+            shade: rollShade,
+            date: new Date().toISOString().slice(0, 10),
+            location: rollLocation,
+            receivedPerson: ret.receivedBy || 'System',
+            rollNumber: 1,
+            batchTotal: 1,
+            batchStatus: 'completed',
+            weight: rollWeight,
+            status: 'in_stock'
+          });
+        } else if (existingDm.status !== 'in_stock') {
+          await existingDm.update({ status: 'in_stock', weight: rollWeight });
+        }
+
+        const existingMat = await Material.findOne({ where: { code: returnRollBarcode } });
+        if (!existingMat) {
+          await Material.create({
+            code: returnRollBarcode,
+            name: rollFabric,
+            category: 'Summer Fabric',
+            subCategory: 'RETURNED',
+            color: rollShade,
+            weight: rollWeight,
+            stockKg: rollWeight,
+            rolls: 1,
+            unit: 'Roll',
+            location: rollLocation,
+            status: 'Active',
+            receivedDate: new Date().toISOString().slice(0, 10),
+            lotNo: rollLot
+          });
+        } else if (existingMat.status !== 'Active') {
+          await existingMat.update({ status: 'Active', stockKg: rollWeight, weight: rollWeight });
+        }
+      } catch (syncErr) {
+        console.warn('Auto-sync error in findRollByBarcode for returned roll:', syncErr.message);
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          'Barcode ID': returnRollBarcode,
+          'Item Description': rollFabric,
+          'Shade': rollShade,
+          'Weight (KG)': rollWeight,
+          'MRN WT': rollWeight,
+          'Status': 'in_stock',
+          'Party': rollParty,
+          'cmfName': rollParty,
+          'Location': rollLocation,
+          'Unit': 'KGS',
+          'Lot Number': rollLot,
+          'isReturn': true,
+          'originalBarcodeId': ret.originalBarcodeId
         }
       });
     }

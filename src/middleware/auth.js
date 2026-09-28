@@ -1,9 +1,11 @@
 import jwt from 'jsonwebtoken';
 import { User } from '../models/index.js';
 
+// In-memory cache for decoded user sessions to prevent database connection starvation
+const userCache = new Map();
+const USER_CACHE_TTL = 3 * 60 * 1000; // 3 minutes
+
 export const authMiddleware = async (req, res, next) => {
-  console.log('Auth Middleware: Incoming request', req.method, req.path);
-  console.log('Auth Middleware: Authorization header', req.headers.authorization);
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -15,16 +17,19 @@ export const authMiddleware = async (req, res, next) => {
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_jwt_key_12345');
-      console.log('Auth Middleware: Token verified. Decoded payload:', decoded);
     } catch (err) {
-      console.error('Auth Middleware: Token verification failed.', err);
       return res.status(401).json({ error: 'Invalid or expired token.' });
     }
 
-    console.log('Auth Middleware: Looking up user with ID:', decoded.id);
+    // Check in-memory user cache first
+    const cached = userCache.get(decoded.id);
+    if (cached && (Date.now() - cached.timestamp < USER_CACHE_TTL)) {
+      req.user = cached.user;
+      return next();
+    }
+
     const user = await User.findByPk(decoded.id);
     if (!user) {
-      console.error('Auth Middleware: No user found for ID', decoded.id);
       return res.status(401).json({ error: 'User not found in system.' });
     }
 
@@ -32,8 +37,8 @@ export const authMiddleware = async (req, res, next) => {
       return res.status(403).json({ error: 'Please verify your email address.' });
     }
 
-    // Attach user (without password) to request
-    req.user = {
+    // Attach user (without password) to request and cache it
+    const userData = {
       id: user.id,
       name: user.name,
       email: user.email,
@@ -42,6 +47,12 @@ export const authMiddleware = async (req, res, next) => {
       avatar: user.avatar,
     };
 
+    userCache.set(decoded.id, {
+      user: userData,
+      timestamp: Date.now()
+    });
+
+    req.user = userData;
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);

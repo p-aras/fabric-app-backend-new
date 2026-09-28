@@ -1,4 +1,4 @@
-import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize, User, Table, ApprovalRequest, LotTableAssignment, IssuedBarcode } from '../models/index.js';
+import { FabricIssuance, DyeingMaterial, Material, Issue, JobOrder, Inventory, FabricChangeApproval, FabricUnitConversionLog, sequelize, User, Table, ApprovalRequest, LotTableAssignment, IssuedBarcode, FabricReturn } from '../models/index.js';
 import { addAuditLog } from './materialController.js';
 import { Op } from 'sequelize';
 
@@ -34,6 +34,27 @@ export const allIssuedBarcodes = async (req, res) => {
       attributes: ['barcodeId']
     }).catch(() => []);
     issuedTableBarcodes.forEach(r => { if (r.barcodeId) barcodeSet.add(r.barcodeId); });
+
+    // Barcodes that are in stock (e.g. returned rolls or active rolls) must NOT be marked as issued
+    const inStockDyeing = await DyeingMaterial.findAll({
+      where: { status: 'in_stock' },
+      attributes: ['barcodeId']
+    });
+    inStockDyeing.forEach(r => barcodeSet.delete(r.barcodeId));
+
+    const inStockMaterial = await Material.findAll({
+      where: { status: 'Active' },
+      attributes: ['code']
+    });
+    inStockMaterial.forEach(m => barcodeSet.delete(m.code));
+
+    const returns = await FabricReturn.findAll({
+      attributes: ['newBarcodeId', 'barcodeId']
+    });
+    returns.forEach(r => {
+      if (r.newBarcodeId) barcodeSet.delete(r.newBarcodeId);
+      if (r.barcodeId) barcodeSet.delete(r.barcodeId);
+    });
 
     res.json({
       success: true,
@@ -917,10 +938,29 @@ export const getCutterMasterIssuanceReport = async (req, res) => {
   }
 };
 
+// In-memory cache for Daily Fabric Issuance Report (TTL 60s)
+const dailyReportCache = new Map();
+const REPORT_CACHE_TTL_MS = 60000;
+
+export const clearDailyReportCache = () => {
+  dailyReportCache.clear();
+};
+
 // 5. GET DAILY FABRIC ISSUANCE REPORT (FILTERED BY DATE, TABLE, FABRIC)
 export const getDailyFabricIssuanceReport = async (req, res) => {
   try {
     const { startDate, endDate, table, fabric } = req.query;
+    const cacheKey = `${startDate || ''}|${endDate || ''}|${table || ''}|${fabric || ''}`;
+
+    const cached = dailyReportCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < REPORT_CACHE_TTL_MS)) {
+      return res.json({
+        success: true,
+        count: cached.data.length,
+        cached: true,
+        data: cached.data
+      });
+    }
 
     let whereClause = {};
     if (fabric) {
@@ -931,6 +971,12 @@ export const getDailyFabricIssuanceReport = async (req, res) => {
 
     const issuances = await FabricIssuance.findAll({
       where: whereClause,
+      attributes: [
+        'id', 'issuanceId', 'lotNumber', 'jobOrderNo', 'fabric', 'brand',
+        'issuedBy', 'department', 'matchingStatus', 'matchingPassedBy',
+        'issuedItems', 'issuedAt', 'createdAt'
+      ],
+      raw: true,
       order: [['id', 'DESC']]
     });
 
@@ -993,6 +1039,11 @@ export const getDailyFabricIssuanceReport = async (req, res) => {
           barcodeIds: item.barcodeIds || []
         });
       });
+    });
+
+    dailyReportCache.set(cacheKey, {
+      timestamp: Date.now(),
+      data: reportData
     });
 
     res.json({

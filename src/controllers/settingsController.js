@@ -1,47 +1,76 @@
-import { Room, Rack, Shelf, Supplier, AuditLog, Material, DyeingMaterial } from '../models/index.js';
+import { Room, Rack, Shelf, Supplier, AuditLog, Material, DyeingMaterial, sequelize } from '../models/index.js';
+import { Op } from 'sequelize';
 import { addAuditLog } from './materialController.js';
+
+let cachedSettingsData = null;
+let settingsCacheTime = 0;
+const SETTINGS_CACHE_TTL = 30 * 1000; // 30 seconds
+
+export const invalidateSettingsCache = () => {
+  cachedSettingsData = null;
+  settingsCacheTime = 0;
+};
 
 export const getSettingsData = async (req, res) => {
   try {
-    const rooms = await Room.findAll();
-    const racks = await Rack.findAll();
-    const shelves = await Shelf.findAll();
-    const materials = await Material.findAll();
-    const dyeingMaterials = await DyeingMaterial.findAll();
-    
-    // Sum rolls per shelf location dynamically
+    if (cachedSettingsData && (Date.now() - settingsCacheTime < SETTINGS_CACHE_TTL)) {
+      return res.json(cachedSettingsData);
+    }
+
+    const [rooms, racks, shelves, suppliers, auditLog, matUsage, dyeUsage] = await Promise.all([
+      Room.findAll({ raw: true }),
+      Rack.findAll({ raw: true }),
+      Shelf.findAll({ raw: true }),
+      Supplier.findAll({ raw: true }),
+      AuditLog.findAll({ order: [['id', 'DESC']], limit: 100, raw: true }),
+      Material.findAll({
+        attributes: ['location', [sequelize.fn('SUM', sequelize.col('rolls')), 'totalRolls']],
+        where: { location: { [Op.ne]: null } },
+        group: ['location'],
+        raw: true
+      }),
+      DyeingMaterial.findAll({
+        attributes: ['location', [sequelize.fn('COUNT', sequelize.col('id')), 'totalRolls']],
+        where: { location: { [Op.ne]: null } },
+        group: ['location'],
+        raw: true
+      })
+    ]);
+
+    // Map shelf usage efficiently from aggregated counts
     const shelfUsedMap = {};
-    materials.forEach(m => {
+    matUsage.forEach(m => {
       if (m.location) {
-        shelfUsedMap[m.location] = (shelfUsedMap[m.location] || 0) + (m.rolls || 0);
+        shelfUsedMap[m.location] = (shelfUsedMap[m.location] || 0) + (parseInt(m.totalRolls) || 0);
       }
     });
-    dyeingMaterials.forEach(dm => {
+    dyeUsage.forEach(dm => {
       if (dm.location) {
-        shelfUsedMap[dm.location] = (shelfUsedMap[dm.location] || 0) + (dm.rolls || 1);
+        shelfUsedMap[dm.location] = (shelfUsedMap[dm.location] || 0) + (parseInt(dm.totalRolls) || 0);
       }
     });
 
-    const enrichedShelves = shelves.map(s => {
-      const data = s.toJSON();
-      data.used = shelfUsedMap[s.id] || 0;
-      return data;
-    });
+    const enrichedShelves = shelves.map(s => ({
+      ...s,
+      used: shelfUsedMap[s.id] || 0
+    }));
 
-    const suppliers = await Supplier.findAll();
-    const auditLog = await AuditLog.findAll({ order: [['id', 'DESC']], limit: 200 });
-    
     // Extract unique floor list from Rooms
     const floors = [...new Set(rooms.map(r => r.floor).filter(Boolean))];
 
-    res.json({
+    const result = {
       rooms,
       racks,
       shelves: enrichedShelves,
       suppliers,
       auditLog,
       floors
-    });
+    };
+
+    cachedSettingsData = result;
+    settingsCacheTime = Date.now();
+
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -51,6 +80,7 @@ export const getSettingsData = async (req, res) => {
 export const addRoom = async (req, res) => {
   try {
     const room = await Room.create(req.body);
+    invalidateSettingsCache();
     await addAuditLog('Room Added', `Room ${room.name} (${room.id}) added`, 'Admin User', 'create');
     res.json(room);
   } catch (error) {
@@ -65,6 +95,7 @@ export const updateRoom = async (req, res) => {
     if (!room) return res.status(404).json({ error: 'Room not found' });
     
     await room.update(req.body);
+    invalidateSettingsCache();
     await addAuditLog('Room Updated', `Room ${id} details updated`, 'Admin User', 'create');
     res.json(room);
   } catch (error) {
@@ -83,6 +114,7 @@ export const deleteRoom = async (req, res) => {
     if (!room) return res.status(404).json({ error: 'Room not found' });
     
     await room.destroy();
+    invalidateSettingsCache();
     await addAuditLog('Room Removed', `Room ${id} deleted`, 'Admin User', 'delete');
     res.json({ success: true });
   } catch (error) {
@@ -94,6 +126,7 @@ export const deleteRoom = async (req, res) => {
 export const addRack = async (req, res) => {
   try {
     const rack = await Rack.create(req.body);
+    invalidateSettingsCache();
     await addAuditLog('Rack Added', `Rack ${rack.name} added to Room ${rack.room}`, 'Admin User', 'create');
     res.json(rack);
   } catch (error) {
@@ -115,7 +148,7 @@ export const deleteRack = async (req, res) => {
     await Shelf.destroy({ where: { rack: id } });
     const rack = await Rack.findByPk(id);
     if (rack) await rack.destroy();
-
+    invalidateSettingsCache();
     await addAuditLog('Rack Removed', `Rack ${id} and its shelves were deleted`, 'Admin User', 'delete');
     res.json({ success: true });
   } catch (error) {
@@ -127,6 +160,7 @@ export const deleteRack = async (req, res) => {
 export const addShelf = async (req, res) => {
   try {
     const shelf = await Shelf.create(req.body);
+    invalidateSettingsCache();
     await addAuditLog('Shelf Added', `Shelf ${shelf.id} added to Rack ${shelf.rack}`, 'Admin User', 'create');
     res.json(shelf);
   } catch (error) {
@@ -144,7 +178,7 @@ export const deleteShelf = async (req, res) => {
     }
     const shelf = await Shelf.findByPk(id);
     if (shelf) await shelf.destroy();
-    
+    invalidateSettingsCache();
     await addAuditLog('Shelf Removed', `Shelf ${id} was deleted`, 'Admin User', 'delete');
     res.json({ success: true });
   } catch (error) {
@@ -156,6 +190,7 @@ export const deleteShelf = async (req, res) => {
 export const addSupplier = async (req, res) => {
   try {
     const sup = await Supplier.create(req.body);
+    invalidateSettingsCache();
     res.json(sup);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -169,6 +204,7 @@ export const updateSupplier = async (req, res) => {
     if (!sup) return res.status(404).json({ error: 'Supplier not found' });
     
     await sup.update(req.body);
+    invalidateSettingsCache();
     res.json(sup);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -180,6 +216,7 @@ export const deleteSupplier = async (req, res) => {
     const { id } = req.params;
     const sup = await Supplier.findByPk(id);
     if (sup) await sup.destroy();
+    invalidateSettingsCache();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
